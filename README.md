@@ -4,7 +4,12 @@ This project is a tool to use to help predict elections. It interacts with Kalsh
 
 We use Temporal for its durable execution guarentees to handle workflows.
 
+# Goals
+
 The goal is to have something that can do research on elections to populate a facts database.
+
+Tools will be dispatched via temporal activities within workflows. Tools can search the knowledge graph or populate it.
+
 
 # AI disclosure
 
