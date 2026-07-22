@@ -19,9 +19,7 @@ class TemporalWorker:
         )
 
     @classmethod
-    async def create(
-        cls, *, client: TemporalClient | None = None
-    ) -> "TemporalWorker":
+    async def create(cls, *, client: TemporalClient | None = None) -> "TemporalWorker":
         if not client:
             client = await TemporalClient.create()  # create + connects
         return TemporalWorker(client=client)

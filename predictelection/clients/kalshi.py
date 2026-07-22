@@ -63,6 +63,7 @@ class Balance(BaseModel):
             updated_at=datetime.fromtimestamp(resp.updated_ts, tz=timezone.utc),
         )
 
+
 class Event(BaseModel):
     event_ticker: StrictStr
     series_ticker: StrictStr
@@ -70,10 +71,16 @@ class Event(BaseModel):
     title: StrictStr
     markets: list[Market] | None = None
 
-    settlement_sources: list[SettlementSource] | None = Field(description="The official sources used for the determination of markets within this event. Methodology is defined in the rulebook.")
+    settlement_sources: list[SettlementSource] | None = Field(
+        description="The official sources used for the determination of markets within this event. Methodology is defined in the rulebook."
+    )
 
-    collateral_return_type: StrictStr = Field(description="Specifies how collateral is returned when markets settle (e.g., 'binary' for standard yes/no markets).")
-    mutually_exclusive: StrictBool = Field(description="If true, only one market in this event can resolve to 'yes'. If false, multiple markets can resolve to 'yes'.")
+    collateral_return_type: StrictStr = Field(
+        description="Specifies how collateral is returned when markets settle (e.g., 'binary' for standard yes/no markets)."
+    )
+    mutually_exclusive: StrictBool = Field(
+        description="If true, only one market in this event can resolve to 'yes'. If false, multiple markets can resolve to 'yes'."
+    )
 
     @classmethod
     def from_event_response(cls, resp: kp.GetEventResponse) -> "Event":
@@ -85,17 +92,28 @@ class Event(BaseModel):
         return cls(
             event_ticker=event.event_ticker,
             series_ticker=event.series_ticker,
-            markets=[Market.from_kalshi_market(m) for m in event.markets] if event.markets is not None else None,
+            markets=[Market.from_kalshi_market(m) for m in event.markets]
+            if event.markets is not None
+            else None,
             sub_title=event.sub_title,
             title=event.title,
-            settlement_sources=[SettlementSource.from_kalshi_model(s) for s in event.settlement_sources] if event.settlement_sources else None,
+            settlement_sources=[
+                SettlementSource.from_kalshi_model(s) for s in event.settlement_sources
+            ]
+            if event.settlement_sources
+            else None,
             collateral_return_type=event.collateral_return_type,
             mutually_exclusive=event.mutually_exclusive,
         )
 
+
 class SettlementSource(BaseModel):
-    name: StrictStr | None = Field(default=None, description="Name of the settlement source")
-    url: StrictStr | None = Field(default=None, description="URL to the settlement source")
+    name: StrictStr | None = Field(
+        default=None, description="Name of the settlement source"
+    )
+    url: StrictStr | None = Field(
+        default=None, description="URL to the settlement source"
+    )
 
     @classmethod
     def from_kalshi_model(cls, model: kp.SettlementSource) -> SettlementSource:
@@ -114,25 +132,56 @@ class Market(BaseModel):
     subtitle: StrictStr | None = None
 
     result: StrictStr | None = None
-    rules_primary: StrictStr = Field(description="A plain language description of the most important market terms")
-    rules_secondary: StrictStr = Field(description="A plain language description of secondary market terms")
+    rules_primary: StrictStr = Field(
+        description="A plain language description of the most important market terms"
+    )
+    rules_secondary: StrictStr = Field(
+        description="A plain language description of secondary market terms"
+    )
 
-    last_price_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
-    yes_bid_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
-    yes_bid_size_fp: StrictStr = Field(description="Fixed-point contract count string (2 decimals, e.g., \"10.00\"; referred to as \"fp\" in field names). Requests accept 0-2 decimal places (e.g., \"10\", \"10.0\", \"10.00\"); responses always emit 2 decimals. Fractional contract values (e.g., \"2.50\") are supported; the minimum granularity is 0.01 contracts.")
-    yes_ask_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
-    yes_ask_size_fp: StrictStr = Field(description="Fixed-point contract count string (2 decimals, e.g., \"10.00\"; referred to as \"fp\" in field names). Requests accept 0-2 decimal places (e.g., \"10\", \"10.0\", \"10.00\"); responses always emit 2 decimals. Fractional contract values (e.g., \"2.50\") are supported; the minimum granularity is 0.01 contracts.")
-    no_bid_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
-    no_ask_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
+    last_price_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
+    yes_bid_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
+    yes_bid_size_fp: StrictStr = Field(
+        description='Fixed-point contract count string (2 decimals, e.g., "10.00"; referred to as "fp" in field names). Requests accept 0-2 decimal places (e.g., "10", "10.0", "10.00"); responses always emit 2 decimals. Fractional contract values (e.g., "2.50") are supported; the minimum granularity is 0.01 contracts.'
+    )
+    yes_ask_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
+    yes_ask_size_fp: StrictStr = Field(
+        description='Fixed-point contract count string (2 decimals, e.g., "10.00"; referred to as "fp" in field names). Requests accept 0-2 decimal places (e.g., "10", "10.0", "10.00"); responses always emit 2 decimals. Fractional contract values (e.g., "2.50") are supported; the minimum granularity is 0.01 contracts.'
+    )
+    no_bid_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
+    no_ask_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
 
-    volume_fp: StrictStr = Field(description="Fixed-point contract count string (2 decimals, e.g., \"10.00\"; referred to as \"fp\" in field names). Requests accept 0-2 decimal places (e.g., \"10\", \"10.0\", \"10.00\"); responses always emit 2 decimals. Fractional contract values (e.g., \"2.50\") are supported; the minimum granularity is 0.01 contracts.")
-    volume_24h_fp: StrictStr = Field(description="Fixed-point contract count string (2 decimals, e.g., \"10.00\"; referred to as \"fp\" in field names). Requests accept 0-2 decimal places (e.g., \"10\", \"10.0\", \"10.00\"); responses always emit 2 decimals. Fractional contract values (e.g., \"2.50\") are supported; the minimum granularity is 0.01 contracts.")
-    liquidity_dollars: Dollars = Field(description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure.")
-    open_interest_fp: StrictStr = Field(description="Fixed-point contract count string (2 decimals, e.g., \"10.00\"; referred to as \"fp\" in field names). Requests accept 0-2 decimal places (e.g., \"10\", \"10.0\", \"10.00\"); responses always emit 2 decimals. Fractional contract values (e.g., \"2.50\") are supported; the minimum granularity is 0.01 contracts.")
+    volume_fp: StrictStr = Field(
+        description='Fixed-point contract count string (2 decimals, e.g., "10.00"; referred to as "fp" in field names). Requests accept 0-2 decimal places (e.g., "10", "10.0", "10.00"); responses always emit 2 decimals. Fractional contract values (e.g., "2.50") are supported; the minimum granularity is 0.01 contracts.'
+    )
+    volume_24h_fp: StrictStr = Field(
+        description='Fixed-point contract count string (2 decimals, e.g., "10.00"; referred to as "fp" in field names). Requests accept 0-2 decimal places (e.g., "10", "10.0", "10.00"); responses always emit 2 decimals. Fractional contract values (e.g., "2.50") are supported; the minimum granularity is 0.01 contracts.'
+    )
+    liquidity_dollars: Dollars = Field(
+        description="US dollar amount as a fixed-point decimal string with up to 6 decimal places of precision. This is the maximum supported precision; valid quote intervals for a given market are constrained by that market's price level structure."
+    )
+    open_interest_fp: StrictStr = Field(
+        description='Fixed-point contract count string (2 decimals, e.g., "10.00"; referred to as "fp" in field names). Requests accept 0-2 decimal places (e.g., "10", "10.0", "10.00"); responses always emit 2 decimals. Fractional contract values (e.g., "2.50") are supported; the minimum granularity is 0.01 contracts.'
+    )
 
-    occurrence_datetime: datetime | None = Field(default=None, description="The recorded datetime when the underlying event occurred, if available")
+    occurrence_datetime: datetime | None = Field(
+        default=None,
+        description="The recorded datetime when the underlying event occurred, if available",
+    )
     created_time: datetime
-    updated_time: datetime = Field(description="Time of the last non-trading metadata update.")
+    updated_time: datetime = Field(
+        description="Time of the last non-trading metadata update."
+    )
     open_time: datetime
     close_time: datetime
 
@@ -142,14 +191,11 @@ class Market(BaseModel):
             ticker=market.ticker,
             event_ticker=market.event_ticker,
             market_type=market.market_type,
-
             title=market.title,
             subtitle=market.subtitle,
-
             result=market.result,
             rules_primary=market.rules_primary,
             rules_secondary=market.rules_secondary,
-
             last_price_dollars=Decimal(market.last_price_dollars),
             yes_bid_dollars=Decimal(market.yes_bid_dollars),
             yes_bid_size_fp=market.yes_bid_size_fp,
@@ -157,18 +203,17 @@ class Market(BaseModel):
             yes_ask_size_fp=market.yes_ask_size_fp,
             no_bid_dollars=Decimal(market.no_bid_dollars),
             no_ask_dollars=Decimal(market.no_ask_dollars),
-
             volume_fp=market.volume_fp,
             volume_24h_fp=market.volume_24h_fp,
             liquidity_dollars=Decimal(market.liquidity_dollars),
             open_interest_fp=market.open_interest_fp,
-
             occurrence_datetime=market.occurrence_datetime,
             created_time=market.created_time,
             updated_time=market.updated_time,
             open_time=market.open_time,
             close_time=market.close_time,
         )
+
 
 class KalshiClient:
     def __init__(self, *, config: KalshiConfig | None = None):
@@ -186,6 +231,10 @@ class KalshiClient:
         _resp: kp.GetBalanceResponse = await self._client.get_balance()
         return Balance.from_balance_resp(_resp)
 
-    async def get_event(self, event_ticker: str, *, with_nested_markets: bool = True) -> Event:
-        _resp: kp.GetEventResponse = await self._client.get_event(event_ticker=event_ticker, with_nested_markets=with_nested_markets)
+    async def get_event(
+        self, event_ticker: str, *, with_nested_markets: bool = True
+    ) -> Event:
+        _resp: kp.GetEventResponse = await self._client.get_event(
+            event_ticker=event_ticker, with_nested_markets=with_nested_markets
+        )
         return Event.from_event_response(_resp)
