@@ -28,8 +28,8 @@ from temporalio.worker import Worker
 from temporalio import workflow
 
 from predictelection.activities.contracts import (
-    ResearchDebatesInput,
-    ResearchDebatesOutput,
+    ResearchInput,
+    ResearchOutput,
 )
 from predictelection.agents.debates import build_agent
 from predictelection.workflows.debates import ResearchDebatesWorkflow
@@ -151,7 +151,7 @@ class StubbedResearchDebatesWorkflow(ResearchDebatesWorkflow):
     __pydantic_ai_agents__ = [STUB_AGENT]
 
     @workflow.run
-    async def run(self, request: ResearchDebatesInput) -> ResearchDebatesOutput:
+    async def run(self, request: ResearchInput) -> ResearchOutput:
         return await super().run(request)
 
 
@@ -213,7 +213,7 @@ def read_session(postgres_engine: Engine):
 async def _run_workflow(
     client: Client,
     activities: ResearchActivities,
-    request: ResearchDebatesInput,
+    request: ResearchInput,
 ):
     task_queue = f"test-{uuid.uuid4()}"
     executor = ThreadPoolExecutor(max_workers=4)
@@ -246,15 +246,15 @@ async def test_the_workflow_stores_only_what_it_can_cite(
     result = await _run_workflow(
         workflow_env.client,
         activities,
-        ResearchDebatesInput(subject="Abdul El-Sayed"),
+        ResearchInput(subject="Abdul El-Sayed"),
     )
 
     assert _CALLS, "the stub model was never called, so the real provider ran"
     # nothing was recorded before this run, so the context block is absent
     assert not any("ALREADY RECORDED" in prompt for prompt in _PROMPTS)
-    assert result.debates_found == 2
-    assert result.debates_new == 1
-    assert result.debates_already_known == 0
+    assert result.records_found == 2
+    assert result.records_new == 1
+    assert result.records_already_known == 0
     assert result.skipped_urls == (BAD_URL,)
     assert result.claims_created > 0
     assert result.claims_corroborated == 0
@@ -298,7 +298,7 @@ async def test_rerunning_the_workflow_does_not_duplicate(
     activities = ResearchActivities(
         session_factory=committed_sessions, store=object_store, http=_http()
     )
-    request = ResearchDebatesInput(subject="Abdul El-Sayed")
+    request = ResearchInput(subject="Abdul El-Sayed")
 
     first = await _run_workflow(workflow_env.client, activities, request)
     claims_after_first = read_session.scalar(select(func.count(Claim.id)))
@@ -310,13 +310,13 @@ async def test_rerunning_the_workflow_does_not_duplicate(
     assert second.research_run_id != first.research_run_id
 
     # but the same entities, and no new propositions
-    assert second.event_ids == first.event_ids
+    assert second.subject_entity_ids == first.subject_entity_ids
     assert read_session.scalar(select(func.count(Claim.id))) == claims_after_first
     assert read_session.scalar(select(func.count(Entity.id))) == entities_after_first
 
     # and it says so plainly instead of claiming to have ingested a debate
-    assert second.debates_new == 0
-    assert second.debates_already_known == 1
+    assert second.records_new == 0
+    assert second.records_already_known == 1
     assert second.claims_created == 0
     assert second.claims_corroborated == first.claims_created
 
@@ -343,7 +343,7 @@ async def test_the_second_run_is_shown_the_first_runs_titles(
     activities = ResearchActivities(
         session_factory=committed_sessions, store=object_store, http=_http()
     )
-    request = ResearchDebatesInput(subject="Abdul El-Sayed")
+    request = ResearchInput(subject="Abdul El-Sayed")
 
     _PROMPTS.clear()
     await _run_workflow(workflow_env.client, activities, request)

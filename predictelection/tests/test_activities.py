@@ -21,8 +21,10 @@ from temporalio.exceptions import ApplicationError
 
 from predictelection.activities.contracts import (
     ArchiveUrlInput,
+    FindEntitiesInput,
+    FindEventsInput,
     FinishResearchRunInput,
-    IngestDebateInput,
+    IngestRecordInput,
     StartResearchRunInput,
 )
 from predictelection.activities.research import MAX_ARCHIVE_BYTES, ResearchActivities
@@ -32,11 +34,14 @@ from predictelection.sql import (
     Artifact,
     Claim,
     ClaimAssertion,
+    EntityKind,
+    EntityMention,
     ResearchRun,
     ResearchRunStatus,
     SourceKind,
     SourceSnapshot,
     TimePrecision,
+    resolve_entity_mention,
 )
 
 
@@ -233,17 +238,17 @@ def test_ingesting_is_idempotent_under_retry(
     archived = activities.archive_url(
         ArchiveUrlInput(url="https://example.test/mi-debate")
     )
-    request = IngestDebateInput(
-        debate=_debate(),
+    request = IngestRecordInput(
+        record=_debate(),
         source_snapshot_id=archived.source_snapshot_id,
         research_run_id=started.research_run_id,
     )
 
-    first = activities.ingest_debate(request)
+    first = activities.ingest_record(request)
     claims_after_first = session.scalar(select(func.count(Claim.id)))
-    second = activities.ingest_debate(request)
+    second = activities.ingest_record(request)
 
-    assert first.event_id == second.event_id
+    assert first.subject_entity_id == second.subject_entity_id
     assert first.assertion_ids == second.assertion_ids
     assert session.scalar(select(func.count(Claim.id))) == claims_after_first
     assert first.misaligned_count == 0
@@ -255,8 +260,8 @@ def test_ingesting_against_a_missing_snapshot_is_not_retryable(
     import uuid
 
     with pytest.raises(ApplicationError) as error:
-        activities.ingest_debate(
-            IngestDebateInput(debate=_debate(), source_snapshot_id=uuid.uuid4())
+        activities.ingest_record(
+            IngestRecordInput(record=_debate(), source_snapshot_id=uuid.uuid4())
         )
     assert error.value.non_retryable is True
 
@@ -270,9 +275,9 @@ def test_claims_are_attributed_to_the_run_and_the_page(
     archived = activities.archive_url(
         ArchiveUrlInput(url="https://example.test/mi-debate")
     )
-    result = activities.ingest_debate(
-        IngestDebateInput(
-            debate=_debate(),
+    result = activities.ingest_record(
+        IngestRecordInput(
+            record=_debate(),
             source_snapshot_id=archived.source_snapshot_id,
             research_run_id=started.research_run_id,
             asserted_by="find_debates",
@@ -289,3 +294,48 @@ def test_claims_are_attributed_to_the_run_and_the_page(
         assert (
             assertion.evidence_anchor.source_snapshot_id == archived.source_snapshot_id
         )
+
+
+def test_looking_up_people_cannot_be_diverted_to_events(
+    activities: ResearchActivities, session: Session
+) -> None:
+    """One lookup activity used to guess which query the caller meant.
+
+    It routed to find_events whenever a date filter was present, and find_events
+    hardcodes kind=EVENT — so asking for people within a window silently
+    searched events and discarded `kind` entirely. Two activities, so there is
+    nothing left to infer.
+    """
+
+    resolve_entity_mention(
+        session, EntityMention(kind=EntityKind.PERSON, name="Abdul El-Sayed")
+    )
+    resolve_entity_mention(
+        session, EntityMention(kind=EntityKind.EVENT, name="Abdul El-Sayed Debate")
+    )
+    session.flush()
+
+    people = activities.find_entities(
+        FindEntitiesInput(name="Abdul El-Sayed", kind=EntityKind.PERSON)
+    )
+    assert [m.kind for m in people.matches] == [EntityKind.PERSON]
+
+    dated = activities.find_events(
+        FindEventsInput(occurred_after=datetime(2020, 1, 1, tzinfo=UTC))
+    )
+    assert all(m.kind is EntityKind.EVENT for m in dated.matches)
+
+
+def test_lookup_reports_truncation_to_the_caller(
+    activities: ResearchActivities, session: Session
+) -> None:
+    """The flag has to survive the contract, or the workflow cannot mention it."""
+
+    for index in range(4):
+        resolve_entity_mention(
+            session, EntityMention(kind=EntityKind.PERSON, name=f"Person {index}")
+        )
+    session.flush()
+
+    assert activities.find_entities(FindEntitiesInput(limit=2)).truncated is True
+    assert activities.find_entities(FindEntitiesInput(limit=50)).truncated is False

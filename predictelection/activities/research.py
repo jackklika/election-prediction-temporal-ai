@@ -33,18 +33,20 @@ from predictelection.activities.contracts import (
     EntityMatchOutput,
     FindEntitiesInput,
     FindEntitiesOutput,
+    FindEventsInput,
     FinishResearchRunInput,
     FinishResearchRunOutput,
-    IngestDebateInput,
-    IngestDebateOutput,
+    IngestRecordInput,
+    IngestRecordOutput,
     StartResearchRunInput,
     StartResearchRunOutput,
 )
 from predictelection.research.archive import SourceArchive
-from predictelection.research.debates import ingest_debate
+from predictelection.research.ingestion import IngestContext
+from predictelection.research.registry import ingestor_for
 from predictelection.sql import (
     ClaimOutcome,
-    EntityKind,
+    EntityMatches,
     ResearchRun,
     ResearchRunStatus,
     SourceSnapshot,
@@ -87,8 +89,9 @@ class ResearchActivities:
             self.start_research_run,
             self.finish_research_run,
             self.archive_url,
-            self.ingest_debate,
+            self.ingest_record,
             self.find_entities,
+            self.find_events,
         ]
 
     # ----------------------------------------------------------------------
@@ -160,35 +163,35 @@ class ResearchActivities:
         """
 
         with self._session_factory() as session:
-            if (
-                request.occurred_after
-                or request.occurred_before
-                or (request.kind is EntityKind.EVENT)
-            ):
-                matches = find_events(
-                    session,
-                    name=request.name,
-                    occurred_after=request.occurred_after,
-                    occurred_before=request.occurred_before,
-                    limit=request.limit,
-                )
-            else:
-                matches = find_entities(
+            return _as_output(
+                find_entities(
                     session,
                     name=request.name,
                     kind=request.kind,
                     limit=request.limit,
                 )
-            return FindEntitiesOutput(
-                matches=tuple(
-                    EntityMatchOutput(
-                        entity_id=m.entity_id,
-                        kind=m.kind,
-                        canonical_name=m.canonical_name,
-                        aliases=m.aliases,
-                        occurred_at=m.occurred_at,
-                    )
-                    for m in matches
+            )
+
+    @activity.defn(name="find_events")
+    def find_events(self, request: FindEventsInput) -> FindEntitiesOutput:
+        """The same, for events, which carry filters no other kind has.
+
+        A separate activity rather than a branch inside find_entities: the
+        branch had to guess which query the caller meant, guessed from the date
+        fields, and threw `kind` away when it guessed events.
+        """
+
+        with self._session_factory() as session:
+            return _as_output(
+                find_events(
+                    session,
+                    name=request.name,
+                    participant_ids=request.participant_ids,
+                    jurisdiction_id=request.jurisdiction_id,
+                    event_kind=request.event_kind,
+                    occurred_after=request.occurred_after,
+                    occurred_before=request.occurred_before,
+                    limit=request.limit,
                 )
             )
 
@@ -249,9 +252,14 @@ class ResearchActivities:
                 already_archived=(observations or 0) > 1,
             )
 
-    @activity.defn(name="ingest_debate")
-    def ingest_debate(self, request: IngestDebateInput) -> IngestDebateOutput:
-        """Turn one reported debate into resolved entities and attributed claims."""
+    @activity.defn(name="ingest_record")
+    def ingest_record(self, request: IngestRecordInput) -> IngestRecordOutput:
+        """Turn one scraped record of any domain into entities and claims.
+
+        Domain-free on purpose. The record's own type selects the ingestor, so
+        adding a scrape does not touch this file — which is what stops the
+        activity layer drifting once several domains write through it.
+        """
 
         with self._session_factory() as session, session.begin():
             snapshot = session.get(SourceSnapshot, request.source_snapshot_id)
@@ -260,26 +268,47 @@ class ResearchActivities:
                     f"no source snapshot {request.source_snapshot_id}",
                     non_retryable=True,
                 )
-            archive = SourceArchive(session, self._store)
-            result = ingest_debate(
-                session,
-                debate=request.debate,
+            context = IngestContext(
+                session=session,
                 snapshot=snapshot,
-                archive=archive,
+                archive=SourceArchive(session, self._store),
                 research_run_id=request.research_run_id,
                 asserted_by=request.asserted_by,
             )
+            result = ingestor_for(request.record)(request.record, context)
             session.flush()
-            return IngestDebateOutput(
-                event_id=result.event_id,
-                event_created=result.event_created,
-                participant_ids=result.participant_ids,
+            return IngestRecordOutput(
+                subject_entity_id=result.subject_entity_id,
+                subject_created=result.subject_created,
+                related_entity_ids=result.related_entity_ids,
                 assertion_ids=tuple(assertion.id for assertion in result.assertions),
                 claims_created=result.count(ClaimOutcome.CREATED),
                 claims_corroborated=result.count(ClaimOutcome.CORROBORATED),
                 claims_unchanged=result.count(ClaimOutcome.UNCHANGED),
                 misaligned_count=len(result.misaligned),
             )
+
+
+def _as_output(found: EntityMatches) -> FindEntitiesOutput:
+    """One output shape for both lookups, truncation flag included.
+
+    Dropping `truncated` here would put the cap back where it started: invisible
+    to the workflow, and therefore invisible to the model.
+    """
+
+    return FindEntitiesOutput(
+        matches=tuple(
+            EntityMatchOutput(
+                entity_id=match.entity_id,
+                kind=match.kind,
+                canonical_name=match.canonical_name,
+                aliases=match.aliases,
+                occurred_at=match.occurred_at,
+            )
+            for match in found
+        ),
+        truncated=found.truncated,
+    )
 
 
 def build_activities(

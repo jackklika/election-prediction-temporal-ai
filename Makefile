@@ -1,4 +1,4 @@
-.PHONY: test test-db db-up db-down lint worker research demo
+.PHONY: test test-db db-up db-down lint worker research demo migrate migration stamp
 
 # Skips the tests that need PostgreSQL or MinIO.
 test:
@@ -17,6 +17,28 @@ db-up:
 db-down:
 	docker compose down
 
+# Bring a real database up to the current schema. This is the only path that
+# works against a database with data in it: create_all cannot alter an existing
+# CHECK constraint or enum, so a new predicate kind applied through it is
+# silently a no-op.
+migrate: db-up
+	uv run alembic upgrade head
+
+# Adopt Alembic on a database that predates it — one built by create_all, which
+# already has every table the baseline would create. Records the revision
+# without running it. Only correct when the schema already matches the models;
+# `make test-db` proves that.
+stamp: db-up
+	uv run alembic stamp head
+
+# Autogenerate a revision from whatever the models say now, then READ IT.
+# Autogenerate does not detect every change — CHECK constraint edits in
+# particular come out empty and have to be written by hand.
+#   make migration MESSAGE="add contest-key namespace"
+migration:
+	@test -n "$(MESSAGE)" || (echo 'usage: make migration MESSAGE="what changed"'; exit 1)
+	uv run alembic revision --autogenerate -m "$(MESSAGE)"
+
 # Runs the workflows and activities. Leave this going in its own terminal; it is
 # what actually does the research, so a run survives `make research` exiting.
 #
@@ -32,9 +54,10 @@ worker: db-up
 # Start a real research run. Needs `make worker` alongside it, and spends
 # Anthropic credit. Watch it at http://localhost:8080
 #   make research SUBJECT="Abdul El-Sayed"
+#   make research SUBJECT="Michigan governor 2026" KIND=structure
 research:
-	@test -n "$(SUBJECT)" || (echo 'usage: make research SUBJECT="Abdul El-Sayed"'; exit 1)
-	uv run python -m predictelection.workflows.trigger "$(SUBJECT)"
+	@test -n "$(SUBJECT)" || (echo 'usage: make research SUBJECT="Abdul El-Sayed" [KIND=debates|structure]'; exit 1)
+	uv run python -m predictelection.workflows.trigger "$(SUBJECT)" --kind "$(or $(KIND),debates)"
 
 # The whole ingestion path on a fixed debate, with no agent and no API calls.
 demo: db-up

@@ -1,74 +1,50 @@
 """Research a politician's debates and record them as attributed claims.
 
-The division of labour is the point:
-
-- the agent reads the web and reports what it found, and never writes;
-- activities fetch, archive, and write, and never reason;
-- this workflow only decides what happens next, so it can replay deterministically.
-
-A debate whose source cannot be fetched is skipped rather than stored. Ingesting
-it anyway would create claims citing a page nobody can check, which is the one
-outcome the provenance model exists to prevent.
+Everything about running a research workflow — opening the run, archiving each
+citation, ingesting, counting, closing — lives in `workflows/base.py`. What is
+left here is the part that is actually about debates: which agent to ask, and
+what to show it so it stops re-describing debates it has already reported.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from temporalio import workflow
-from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
 
 from predictelection.activities.contracts import (
-    ArchiveUrlInput,
-    ArchiveUrlOutput,
     FindEntitiesInput,
     FindEntitiesOutput,
-    FinishResearchRunInput,
-    FinishResearchRunOutput,
-    IngestDebateInput,
-    IngestDebateOutput,
-    ResearchDebatesInput,
-    ResearchDebatesOutput,
-    StartResearchRunInput,
-    StartResearchRunOutput,
+    FindEventsInput,
+    ResearchInput,
+    ResearchOutput,
+)
+from predictelection.workflows.base import (
+    READ_ACTIVITY,
+    Activity,
+    ResearchWorkflow,
 )
 
 with workflow.unsafe.imports_passed_through():
-    from pydantic_ai.durable_exec.temporal import PydanticAIWorkflow
-
-    from predictelection.agents.debates import DebateFindings, debate_agent
-    from predictelection.sql import EntityKind, ResearchRunStatus, SourceKind
-
-
-WRITE_ACTIVITY = workflow.ActivityConfig(
-    start_to_close_timeout=timedelta(seconds=60),
-    retry_policy=RetryPolicy(maximum_attempts=5),
-)
-READ_ACTIVITY = workflow.ActivityConfig(
-    start_to_close_timeout=timedelta(seconds=30),
-    retry_policy=RetryPolicy(maximum_attempts=3),
-)
-FETCH_ACTIVITY = workflow.ActivityConfig(
-    start_to_close_timeout=timedelta(seconds=90),
-    retry_policy=RetryPolicy(maximum_attempts=3),
-)
+    from predictelection.agents.debates import debate_agent
+    from predictelection.research.debates import ScrapedDebate
+    from predictelection.sql import EntityKind, PoliticalEventKind
 
 
-# sandboxed=False deliberately. Temporal's sandbox re-imports every module a
-# workflow touches, and three things in this dependency tree defeat that on
-# Python 3.14: beartype (pulled in by pydantic-ai via py-key-value-aio) installs
-# a global import hook that hits a circular import under the sandbox importer,
-# SQLAlchemy trips "__type_params__ must be set to a tuple" on re-import, and
-# passing our own package through to avoid both leaves the workflow uninstrumented
-# anyway — the same result with more machinery and less clarity.
-#
-# What the sandbox would protect against is absent here by construction: the body
-# below only awaits activities and the agent. No clock, no randomness, no I/O, no
-# mutable global state. Everything non-deterministic is already an activity,
-# which is where it has to be regardless of this setting.
+DEDUP_CONTEXT_LIMIT = 50
+"""How many already-recorded debates to show the agent.
+
+A cap is unavoidable — the prompt has a budget — so what matters is that the
+rows it keeps are the subject's most recent ones and that hitting it is logged.
+"""
+
+SUBJECT_MATCH_LIMIT = 5
+"""People one subject name may resolve to. All of their debates get shown."""
+
+
+# sandboxed=False: see the rationale in workflows/base.py.
 @workflow.defn(sandboxed=False)
-class ResearchDebatesWorkflow(PydanticAIWorkflow):
+class ResearchDebatesWorkflow(ResearchWorkflow):
+    task_type = "find_debates"
+
     # Referenced through the class rather than the module global so a subclass can
     # substitute a stub agent. agent.override() cannot do it: the model call is an
     # activity, and the worker's task does not inherit the overriding context.
@@ -76,48 +52,12 @@ class ResearchDebatesWorkflow(PydanticAIWorkflow):
     __pydantic_ai_agents__ = [debate_agent]
 
     @workflow.run
-    async def run(self, request: ResearchDebatesInput) -> ResearchDebatesOutput:
-        started: StartResearchRunOutput = await workflow.execute_activity(
-            "start_research_run",
-            StartResearchRunInput(
-                task_type="find_debates",
-                subject=request.subject,
-                workflow_id=workflow.info().workflow_id,
-                workflow_run_id=workflow.info().run_id,
-                agent_name=self.agent.name,
-            ),
-            result_type=StartResearchRunOutput,
-            **WRITE_ACTIVITY,
-        )
+    async def run(self, request: ResearchInput) -> ResearchOutput:
+        # Temporal requires the run method on the class carrying @workflow.defn,
+        # so this cannot simply be inherited. The body is in ResearchWorkflow.
+        return await self.research(request)
 
-        try:
-            findings = await self._find_debates(request.subject)
-            result = await self._record(request, started, findings)
-        except Exception as error:
-            await workflow.execute_activity(
-                "finish_research_run",
-                FinishResearchRunInput(
-                    research_run_id=started.research_run_id,
-                    status=ResearchRunStatus.FAILED,
-                    error_message=str(error)[:2000],
-                ),
-                result_type=FinishResearchRunOutput,
-                **WRITE_ACTIVITY,
-            )
-            raise
-
-        await workflow.execute_activity(
-            "finish_research_run",
-            FinishResearchRunInput(
-                research_run_id=started.research_run_id,
-                status=ResearchRunStatus.SUCCEEDED,
-            ),
-            result_type=FinishResearchRunOutput,
-            **WRITE_ACTIVITY,
-        )
-        return result
-
-    async def _find_debates(self, subject: str) -> DebateFindings:
+    async def gather(self, request: ResearchInput) -> tuple[ScrapedDebate, ...]:
         """Look up what is already recorded, then ask the agent.
 
         The workflow fetches the context rather than the agent reaching for it.
@@ -128,78 +68,53 @@ class ResearchDebatesWorkflow(PydanticAIWorkflow):
         purely a reader.
         """
 
-        known: FindEntitiesOutput = await workflow.execute_activity(
-            "find_entities",
-            FindEntitiesInput(kind=EntityKind.EVENT, limit=50),
+        run = await self.agent.run(
+            f"Find the notable debates {request.subject} has taken part in."
+            + await self._already_recorded(request.subject)
+        )
+        return run.output.debates
+
+    async def _already_recorded(self, subject: str) -> str:
+        """The subject's own debates, not the alphabetically first 50 events.
+
+        This used to ask for `kind=EVENT, limit=50` with no other filter, and
+        `find_events` ordered by canonical_name — so past 50 events the agent was
+        shown the alphabetically first 50, none of them necessarily the
+        subject's, while this block still rendered as though it were complete.
+        Scoping to the subject is what makes the list mean what it says.
+        """
+
+        people: FindEntitiesOutput = await workflow.execute_activity(
+            Activity.FIND_ENTITIES,
+            FindEntitiesInput(
+                name=subject, kind=EntityKind.PERSON, limit=SUBJECT_MATCH_LIMIT
+            ),
             result_type=FindEntitiesOutput,
             **READ_ACTIVITY,
         )
-        run = await self.agent.run(
-            f"Find the notable debates {subject} has taken part in."
-            + _already_recorded(known)
+        if not people.matches:
+            # Nothing about this subject is recorded yet, so there is nothing to
+            # reuse. An empty block is honest; a global list would not be.
+            return ""
+
+        known: FindEntitiesOutput = await workflow.execute_activity(
+            Activity.FIND_EVENTS,
+            FindEventsInput(
+                participant_ids=tuple(match.entity_id for match in people.matches),
+                event_kind=PoliticalEventKind.DEBATE,
+                limit=DEDUP_CONTEXT_LIMIT,
+            ),
+            result_type=FindEntitiesOutput,
+            **READ_ACTIVITY,
         )
-        return run.output
-
-    async def _record(
-        self,
-        request: ResearchDebatesInput,
-        started: StartResearchRunOutput,
-        findings: DebateFindings,
-    ) -> ResearchDebatesOutput:
-        event_ids: list = []
-        skipped: list[str] = []
-        new_debates = 0
-        created = corroborated = unchanged = misaligned = 0
-
-        for debate in findings.debates:
-            try:
-                archived: ArchiveUrlOutput = await workflow.execute_activity(
-                    "archive_url",
-                    ArchiveUrlInput(
-                        url=debate.source_url,
-                        kind=SourceKind.WEB_PAGE,
-                        title=debate.title,
-                    ),
-                    result_type=ArchiveUrlOutput,
-                    **FETCH_ACTIVITY,
-                )
-            except ActivityError:
-                # An unfetchable citation is not a workflow failure; it means
-                # this one debate cannot be evidenced, so it does not get stored.
-                workflow.logger.warning("could not archive %s", debate.source_url)
-                skipped.append(debate.source_url)
-                continue
-
-            ingested: IngestDebateOutput = await workflow.execute_activity(
-                "ingest_debate",
-                IngestDebateInput(
-                    debate=debate,
-                    source_snapshot_id=archived.source_snapshot_id,
-                    research_run_id=started.research_run_id,
-                    asserted_by=request.asserted_by or debate_agent.name,
-                ),
-                result_type=IngestDebateOutput,
-                **WRITE_ACTIVITY,
+        if known.truncated:
+            workflow.logger.warning(
+                "dedup context truncated at %d debates for %r; "
+                "the agent cannot see the rest and may duplicate them",
+                DEDUP_CONTEXT_LIMIT,
+                subject,
             )
-            event_ids.append(ingested.event_id)
-            new_debates += 1 if ingested.event_created else 0
-            created += ingested.claims_created
-            corroborated += ingested.claims_corroborated
-            unchanged += ingested.claims_unchanged
-            misaligned += ingested.misaligned_count
-
-        return ResearchDebatesOutput(
-            research_run_id=started.research_run_id,
-            debates_found=len(findings.debates),
-            debates_new=new_debates,
-            debates_already_known=len(event_ids) - new_debates,
-            claims_created=created,
-            claims_corroborated=corroborated,
-            claims_unchanged=unchanged,
-            misaligned_count=misaligned,
-            event_ids=tuple(event_ids),
-            skipped_urls=tuple(skipped),
-        )
+        return _already_recorded(known)
 
 
 def _already_recorded(known: FindEntitiesOutput) -> str:
@@ -212,7 +127,15 @@ def _already_recorded(known: FindEntitiesOutput) -> str:
         + (f"  ({match.occurred_at:%Y-%m-%d})" if match.occurred_at else "")
         for match in known.matches
     )
+    # Saying the list is partial matters: presented as complete, it reads as
+    # "everything else is new", which is the licence to duplicate.
+    caveat = (
+        "\n(This list is capped and shows the most recent ones only — older "
+        "debates may already be recorded under titles not shown here.)"
+        if known.truncated
+        else ""
+    )
     return (
         "\n\nALREADY RECORDED — reuse these titles exactly if you find the "
-        f"same debate:\n{lines}"
+        f"same debate:\n{lines}{caveat}"
     )

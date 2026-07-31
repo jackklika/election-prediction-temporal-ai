@@ -43,6 +43,7 @@ from predictelection.sql.base import (
     canonical_json_sha256,
     created_at_timestamp,
     enum_type,
+    idempotency_key,
     insert_sequence,
     nullable_jsonb,
     utc_timestamp,
@@ -879,4 +880,48 @@ class ClaimSupersession(Immutable, Base):
         ),
         CheckConstraint("created_by <> '' AND reason <> ''", name="audit_nonempty"),
         Index("ix_claim_supersession_successor_claim_id", "successor_claim_id"),
+    )
+
+
+def new_claim_supersession(
+    *,
+    predecessor: Claim,
+    successor: Claim,
+    created_by: str,
+    reason: str,
+    origin: RecordOrigin = RecordOrigin.SYSTEM,
+) -> ClaimSupersession:
+    """Record that one claim replaces another, without editing either.
+
+    A correction is a second claim plus this link, never a mutation: the graph
+    has to be able to answer "what did we believe on date X", and an updated row
+    destroys that answer. The predecessor stays readable afterwards.
+
+    The idempotency key is derived from the two claims rather than supplied,
+    which is the whole reason this function exists. Every caller hand-rolling
+    its own key is how the same correction gets recorded twice under two keys —
+    `uq_claim_supersession_predecessor` would then reject the second one at
+    write time, turning a retry into a failure instead of a no-op.
+
+    Election night to canvass to recount to certified is a chain of these, not
+    four edits to one row.
+    """
+
+    if not created_by.strip() or not reason.strip():
+        # ck_claim_supersession_audit_nonempty says the same thing, but a
+        # correction with no stated reason is worth refusing before the round
+        # trip rather than after it.
+        raise ValueError("a supersession must say who made it and why")
+
+    return ClaimSupersession(
+        idempotency_key=idempotency_key(
+            "claim_supersession",
+            predecessor=str(predecessor.id),
+            successor=str(successor.id),
+        ),
+        predecessor_claim_id=predecessor.id,
+        successor_claim_id=successor.id,
+        origin=origin,
+        created_by=created_by,
+        reason=reason,
     )

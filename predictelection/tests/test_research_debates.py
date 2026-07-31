@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from predictelection.research import (
+    IngestContext,
     ScrapedDebate,
     ScrapedEntity,
     SourceArchive,
@@ -35,6 +36,7 @@ from predictelection.sql import (
     ontology_alignment_score,
 )
 from predictelection.storage import ObjectNotFound
+from predictelection.tests.helpers import assert_reingestion_is_idempotent
 
 
 pytestmark = pytest.mark.postgres
@@ -117,7 +119,8 @@ def test_a_scraped_debate_becomes_attributable_claims(
     session.flush()
 
     result = ingest_debate(
-        session, debate=_debate(), snapshot=snapshot, research_run_id=run.id
+        _debate(),
+        IngestContext(session=session, snapshot=snapshot, research_run_id=run.id),
     )
 
     # event_kind, event_occurrence, 2 participants, contest, jurisdiction
@@ -132,7 +135,7 @@ def test_a_scraped_debate_becomes_attributable_claims(
 
     kinds = {
         _kind_of(session, entity_id)
-        for entity_id in [result.event_id, *result.participant_ids]
+        for entity_id in [result.subject_entity_id, *result.related_entity_ids]
     }
     assert kinds == {EntityKind.EVENT, EntityKind.PERSON}
 
@@ -141,17 +144,16 @@ def test_the_debate_timing_keeps_its_precision(session: Session, snapshot) -> No
     """A source that only gave a date must not gain a false start time."""
 
     result = ingest_debate(
-        session,
-        debate=_debate(
+        _debate(
             starts_at=datetime(2026, 9, 15, tzinfo=UTC),
             starts_at_precision=TimePrecision.DAY,
             ends_at=None,
         ),
-        snapshot=snapshot,
+        IngestContext(session=session, snapshot=snapshot),
     )
     occurrence = session.scalars(
         select(Claim).where(
-            Claim.subject_id == result.event_id,
+            Claim.subject_id == result.subject_entity_id,
             Claim.predicate_version_id
             == get_predicate_spec("event_occurrence").predicate_version_id,
         )
@@ -166,16 +168,18 @@ def test_the_debate_timing_keeps_its_precision(session: Session, snapshot) -> No
 def test_rescraping_the_same_debate_is_idempotent(session: Session, snapshot) -> None:
     """The property that lets a Temporal activity retry safely."""
 
-    first = ingest_debate(session, debate=_debate(), snapshot=snapshot)
-    claims_after_first = session.scalar(select(func.count(Claim.id)))
-    entities_after_first = session.scalar(select(func.count(Entity.id)))
+    results = []
 
-    second = ingest_debate(session, debate=_debate(), snapshot=snapshot)
+    def once() -> None:
+        results.append(
+            ingest_debate(_debate(), IngestContext(session=session, snapshot=snapshot))
+        )
 
-    assert second.event_id == first.event_id
-    assert second.participant_ids == first.participant_ids
-    assert session.scalar(select(func.count(Claim.id))) == claims_after_first
-    assert session.scalar(select(func.count(Entity.id))) == entities_after_first
+    assert_reingestion_is_idempotent(session, once)
+
+    first, second = results
+    assert second.subject_entity_id == first.subject_entity_id
+    assert second.related_entity_ids == first.related_entity_ids
     assert {a.id for a in second.assertions} == {a.id for a in first.assertions}
 
 
@@ -184,7 +188,7 @@ def test_a_second_source_corroborates_the_same_debate(
 ) -> None:
     """Two outlets reporting one debate is one claim with two assertions."""
 
-    ingest_debate(session, debate=_debate(), snapshot=snapshot)
+    ingest_debate(_debate(), IngestContext(session=session, snapshot=snapshot))
     other_snapshot = archive.observe(
         kind=SourceKind.WEB_PAGE,
         canonical_url="https://other.test/mi-debate",
@@ -192,7 +196,7 @@ def test_a_second_source_corroborates_the_same_debate(
         media_type="text/html",
         retrieved_at=datetime(2026, 9, 17, 9, 0, tzinfo=UTC),
     )
-    ingest_debate(session, debate=_debate(), snapshot=other_snapshot)
+    ingest_debate(_debate(), IngestContext(session=session, snapshot=other_snapshot))
 
     occurrence_claims = session.scalars(
         select(Claim.id).where(
@@ -214,27 +218,27 @@ def test_an_entity_id_survives_a_renamed_participant(
 ) -> None:
     """The Wikidata QID keeps a later spelling on the same person."""
 
-    first = ingest_debate(session, debate=_debate(), snapshot=snapshot)
+    first = ingest_debate(_debate(), IngestContext(session=session, snapshot=snapshot))
     renamed = ingest_debate(
-        session,
-        debate=_debate(
+        _debate(
             title="2026 Michigan Governor Debate (rerun coverage)",
             participants=(
                 ScrapedEntity(name="Dr. Abdul El-Sayed", wikidata_id="Q28137641"),
             ),
         ),
-        snapshot=snapshot,
+        IngestContext(session=session, snapshot=snapshot),
     )
-    assert renamed.participant_ids[0] == first.participant_ids[0]
+    assert renamed.related_entity_ids[0] == first.related_entity_ids[0]
 
 
 def test_the_video_is_registered_for_later_transcription(
     session: Session, archive: SourceArchive, snapshot
 ) -> None:
     result = ingest_debate(
-        session, debate=_debate(), snapshot=snapshot, archive=archive
+        _debate(),
+        IngestContext(session=session, snapshot=snapshot, archive=archive),
     )
-    assert result.video_source_id is not None
+    assert result.registered_source_ids != ()
 
 
 def test_a_transcript_keeps_its_lineage_to_the_recording(

@@ -16,6 +16,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from predictelection.research.contests import CONTEST_KEY_PATTERN
 from predictelection.sql import EntityKind, EntityMention, ExternalIdentifier
 
 
@@ -65,11 +66,24 @@ class ScrapedEntity(ScrapedModel):
         max_length=32,
         description="FEC candidate or committee ID, for US federal races.",
     )
+    contest_key: str | None = Field(
+        default=None,
+        pattern=CONTEST_KEY_PATTERN,
+        description=(
+            "For a contest only: division/office/cycle/stage[/party], e.g. "
+            "'ocd-division/country:us/state:mi/governor/2026/primary/democratic'. "
+            "Nobody issues contest IDs, so this is derived from what the race "
+            "is. Compute it from facts the source states — do not guess a "
+            "plausible-looking one, and leave it null if the source does not "
+            "make the office, the year and the stage clear."
+        ),
+    )
 
     _IDENTIFIER_FIELDS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("wikidata", "wikidata_id"),
         ("ocd-division", "ocd_id"),
         ("fec", "fec_id"),
+        ("contest-key", "contest_key"),
     )
     """Field-to-namespace map. Named fields because a model fills in `ocd_id`
     far more reliably than a free-form namespace/value pair — but the mapping is
@@ -110,3 +124,15 @@ class ScrapedRecord(ScrapedModel):
             "omitted rather than reported."
         ),
     )
+
+    @property
+    def source_title(self) -> str | None:
+        """A human label for the archived page, when the record has one.
+
+        A property rather than a field: it is derived from what the record
+        already says, and asking a model to repeat it as a separate answer is
+        one more thing for it to get inconsistent. Overridden by domains that
+        have an obvious title; None is a fine answer for those that do not.
+        """
+
+        return None

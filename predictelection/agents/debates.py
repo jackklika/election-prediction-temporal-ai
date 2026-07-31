@@ -4,14 +4,12 @@ Its output type is ScrapedDebate itself rather than a private model, so there is
 no mapping step between what the model emits and what gets stored — one schema,
 one place for the field descriptions, nothing to drift.
 
-The agent only reads and reports. It never touches the database: writing is an
-activity, so a retried or replayed workflow cannot re-run the LLM but can safely
-re-run the write.
+Only what is specific to debates lives here. The capabilities, and the rules
+about citing and precision and identifiers that every domain shares, come from
+`agents/base.py`.
 """
 
 from __future__ import annotations
-
-from typing import cast
 
 from temporalio import workflow
 
@@ -19,17 +17,11 @@ from predictelection.research.debates import ScrapedDebate
 
 
 with workflow.unsafe.imports_passed_through():
-    from datetime import timedelta
-
     from pydantic import BaseModel, Field
     from pydantic_ai import Agent
-    from pydantic_ai.capabilities import Instrumentation, WebSearch
-    from pydantic_ai.durable_exec.temporal import TemporalDurability
-    from pydantic_ai.models.anthropic import AnthropicModel
-    from pydantic_ai.providers.anthropic import AnthropicProvider
-    from pydantic_ai_harness import CodeMode
 
-    from predictelection.clients.anthropic import AnthropicConfig
+    from predictelection.agents.base import build_research_agent
+    from predictelection.clients.anthropic import AnthropicConfig, Effort
 
 
 class DebateFindings(BaseModel):
@@ -48,66 +40,57 @@ INSTRUCTIONS = """\
 You find debates that a politician took part in, and report them so they can be
 stored as verifiable facts.
 
-Debates already recorded are listed in the prompt under ALREADY RECORDED. If one
-of them is a debate you found, REPORT IT UNDER THAT EXACT TITLE, character for
-character. Re-describing a debate that is already recorded creates a duplicate
-nobody can automatically merge — the same event under two names is worse than
-reporting it once.
-
-Rules that matter more than completeness:
-- Cite every debate with the source_url you actually read it on. A debate you
-  cannot cite must be left out.
-- Never claim more precision than the source gave. If it says only a date, set
-  starts_at_precision to 'day'. Use the article's publication date to resolve
-  relative wording like "last night".
+Debate-specific rules:
 - List moderators and panelists under `moderators`, never under `participants`.
   Participants are the people competing against each other.
-- Only give an identifier — wikidata_id, ocd_id, fec_id — when you are certain
-  it is the right one. A wrong identifier merges two different people, which is
-  far more damaging than leaving it null.
-- Prefer official or primary sources over aggregators.
+- A primary debate and a general-election debate are different events even when
+  the same people appear in both.
+"""
+
+
+EFFORT: Effort = "high"
+"""Above the project default, on the theory that here effort buys recall.
+
+**Not yet established.** The observation behind it: on one subject with an empty
+graph, Sonnet 4.6 at `high` reported six debates including three from the
+subject's 2018 gubernatorial race, while Sonnet 5 at `medium` reported only the
+three 2026 Senate primary debates. That is two variables moving at once — the
+model changed with the effort — so it is equally consistent with Sonnet 5
+scoping more tightly than 4.6. A controlled run (same model, effort swept) has
+not been done.
+
+Set high anyway because the asymmetry favours it: finding a debate is this
+agent's entire job, a debate nobody reports is indistinguishable from one that
+never happened, and at `high` a run still finishes in a few minutes. Lower it
+once there is a measurement, not before.
+
+Effort is usually a cost knob. On an agent whose output is coverage it is
+plausibly a recall knob, which is why it is per domain: the structure agent
+answers a far more scoped question.
+
+ANTHROPIC_EFFORT still overrides this, so a sweep measures this agent too.
 """
 
 
 def build_agent(
     config: AnthropicConfig | None = None, *, model=None
 ) -> Agent[None, DebateFindings]:
-    """Construct the debate agent.
+    """This domain's agent, so a test can stub the model without restating it.
 
-    `model` exists so tests can supply a stub. It has to be injected here rather
-    than swapped later with `agent.override()`: TemporalDurability turns model
-    calls into activities, and the worker's activity task does not inherit the
-    context variable that override sets, so the real provider gets used anyway —
-    silently, over the network, at cost.
+    Injected at construction rather than swapped with `agent.override()`:
+    TemporalDurability turns model calls into activities, and the worker's
+    activity task does not inherit the context variable override sets, so the
+    real provider gets used anyway — silently, over the network, at cost.
     """
 
-    if model is None:
-        # Only resolved when a real model is wanted, so a stubbed agent needs no
-        # API key at all.
-        settings = config or AnthropicConfig()  # ty: ignore[missing-argument]
-        model = AnthropicModel(
-            settings.default_model,
-            provider=AnthropicProvider(api_key=settings.api_key),
-        )
-    # cast because the checker cannot follow output_type= through Agent's
-    # overloads; DebateFindings is what it actually returns.
-    agent = Agent(
-        model,
+    return build_research_agent(
         name="find_debates",
         instructions=INSTRUCTIONS,
         output_type=DebateFindings,
-        capabilities=[
-            TemporalDurability(
-                activity_config=workflow.ActivityConfig(
-                    start_to_close_timeout=timedelta(minutes=5)
-                )
-            ),
-            WebSearch(),
-            Instrumentation(),
-            CodeMode(),
-        ],
+        config=config,
+        model=model,
+        effort=EFFORT,
     )
-    return cast("Agent[None, DebateFindings]", agent)
 
 
 debate_agent = build_agent()

@@ -13,17 +13,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from predictelection.clients.sqlalchemy_engine import PostgresConfig
+from predictelection.clients.sqlalchemy_engine import SqlAlchemyEngineClient
 from predictelection.research.archive import SourceArchive
 from predictelection.research.debates import ScrapedDebate, ScrapedEntity, ingest_debate
+from predictelection.research.ingestion import IngestContext
 from predictelection.sql import (
     Claim,
     ClaimAssertion,
     Entity,
     PREDICATE_SPECS,
+    RecordOrigin,
     ResearchRun,
     ResearchRunStatus,
     ReviewTask,
@@ -95,8 +97,9 @@ def describe(session: Session) -> None:
 
 
 def main() -> None:
-    config = PostgresConfig()  # ty: ignore[missing-argument]  # loaded from .env
-    engine = create_engine(config.url, connect_args={"options": "-c timezone=utc"})
+    # Through the shared client rather than its own create_engine, so the demo
+    # exercises the pool and echo settings the worker actually runs with.
+    engine = SqlAlchemyEngineClient().engine
     create_schema(engine)
 
     store = S3ObjectStore(local_minio_config())
@@ -123,12 +126,15 @@ def main() -> None:
             retrieved_at=datetime(2026, 9, 16, 8, 0, tzinfo=UTC),
         )
         result = ingest_debate(
-            session,
-            debate=DEBATE,
-            snapshot=snapshot,
-            archive=archive,
-            research_run_id=run.id,
-            asserted_by="demo",
+            DEBATE,
+            IngestContext(
+                session=session,
+                snapshot=snapshot,
+                archive=archive,
+                research_run_id=run.id,
+                asserted_by="demo",
+                origin=RecordOrigin.SYSTEM,
+            ),
         )
 
         run.status = ResearchRunStatus.SUCCEEDED

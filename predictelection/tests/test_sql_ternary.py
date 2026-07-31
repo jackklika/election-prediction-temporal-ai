@@ -28,6 +28,7 @@ from predictelection.sql import (
     get_or_create_claim,
     get_predicate_spec,
     new_claim,
+    new_claim_supersession,
 )
 from predictelection.tests import factories as f
 
@@ -292,3 +293,85 @@ def test_endorsement_strength_distinguishes_a_withdrawal(session: Session) -> No
     session.flush()
 
     assert backed.id != pulled.id
+
+
+def test_a_recount_supersedes_rather_than_edits(session: Session) -> None:
+    """Election night to certified is a chain of claims, not edits to one row.
+
+    The graph has to answer "what did we believe on the night", so the original
+    count stays readable. new_claim_supersession derives the idempotency key
+    from the two claims, so a retried correction is a no-op instead of tripping
+    uq_claim_supersession_predecessor.
+    """
+
+    candidate = f.make_entity(session, kind=EntityKind.PERSON)
+    contest = f.make_entity(session, kind=EntityKind.CONTEST)
+    spec = get_predicate_spec("contest_result")
+
+    election_night, _ = get_or_create_claim(
+        session,
+        predicate=spec,
+        subject_id=candidate.id,
+        object_id=contest.id,
+        value={"votes": 481_000, "share": Decimal("48.7"), "won": False},
+    )
+    certified, _ = get_or_create_claim(
+        session,
+        predicate=spec,
+        subject_id=candidate.id,
+        object_id=contest.id,
+        value={"votes": 482_113, "share": Decimal("48.75"), "won": True},
+    )
+    session.flush()
+    assert certified.id != election_night.id
+
+    link = new_claim_supersession(
+        predecessor=election_night,
+        successor=certified,
+        created_by="mi-sos-canvass",
+        reason="certified canvass replaced the election-night count",
+    )
+    session.add(link)
+    session.flush()
+
+    # the superseded claim is still there to be read
+    assert session.get(Claim, election_night.id) is not None
+    assert link.predecessor_claim_id == election_night.id
+    assert link.successor_claim_id == certified.id
+
+    # the same correction, computed again, keys the same — a retry, not a clash
+    again = new_claim_supersession(
+        predecessor=election_night,
+        successor=certified,
+        created_by="mi-sos-canvass",
+        reason="certified canvass replaced the election-night count",
+    )
+    assert again.idempotency_key == link.idempotency_key
+
+
+def test_a_supersession_must_say_who_and_why(session: Session) -> None:
+    """ck_claim_supersession_audit_nonempty, refused before the round trip."""
+
+    candidate = f.make_entity(session, kind=EntityKind.PERSON)
+    contest = f.make_entity(session, kind=EntityKind.CONTEST)
+    spec = get_predicate_spec("contest_result")
+    first, _ = get_or_create_claim(
+        session,
+        predicate=spec,
+        subject_id=candidate.id,
+        object_id=contest.id,
+        value={"votes": 1, "won": False},
+    )
+    second, _ = get_or_create_claim(
+        session,
+        predicate=spec,
+        subject_id=candidate.id,
+        object_id=contest.id,
+        value={"votes": 2, "won": False},
+    )
+    session.flush()
+
+    with pytest.raises(ValueError, match="who made it and why"):
+        new_claim_supersession(
+            predecessor=first, successor=second, created_by="", reason="typo"
+        )

@@ -73,10 +73,10 @@ def _default_registrations() -> dict[str, Sequence[Any]]:
     """
 
     from predictelection.activities.research import build_activities
-    from predictelection.workflows.debates import ResearchDebatesWorkflow
+    from predictelection.workflows.registry import WORKFLOWS
 
     return {
-        "workflows": [ResearchDebatesWorkflow],
+        "workflows": list(WORKFLOWS),
         "activities": build_activities().all(),
     }
 

@@ -150,6 +150,38 @@ NAMESPACE_SPECS: tuple[NamespaceSpec, ...] = (
         # to anything issued by an authority.
         precedence=50,
     ),
+    NamespaceSpec(
+        namespace="contest-key",
+        label="Derived contest key",
+        # Issued by this project, because nobody issues one. A contest has no
+        # external identifier, so three sources describing the same race would
+        # otherwise fork it three ways on wording alone. The value is derived
+        # from division, office, cycle, stage and party — see
+        # research/contests.py — so anything that can describe a contest
+        # arrives at the same string without coordination.
+        authority=None,
+        # Last: derived by us from other people's facts, so any identifier an
+        # actual authority issued should win a disagreement.
+        precedence=60,
+    ),
+    NamespaceSpec(
+        namespace="office-key",
+        label="Derived office key",
+        # Same argument as contest-key, for the seat rather than the race:
+        # division plus office, with no cycle, because a seat outlives any one
+        # election. Without it "every governorship up in 2026" cannot be asked.
+        authority=None,
+        precedence=60,
+    ),
+    NamespaceSpec(
+        namespace="election-key",
+        label="Derived election key",
+        # Division, cycle and stage. Several contests share one election day,
+        # and that grouping is only reliable if everyone derives the same ID
+        # for it rather than naming it.
+        authority=None,
+        precedence=60,
+    ),
 )
 
 

@@ -18,8 +18,13 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from predictelection.research.debates import ScrapedDebate
-from predictelection.sql import EntityKind, ResearchRunStatus, SourceKind
+from predictelection.research.registry import ScrapedPayload
+from predictelection.sql import (
+    EntityKind,
+    PoliticalEventKind,
+    ResearchRunStatus,
+    SourceKind,
+)
 
 
 class Contract(BaseModel):
@@ -93,19 +98,34 @@ class ArchiveUrlOutput(Contract):
 # --------------------------------------------------------------------------
 
 
-class IngestDebateInput(Contract):
-    debate: ScrapedDebate
+class IngestRecordInput(Contract):
+    """One scraped record of any domain, plus the evidence it must cite.
+
+    Generic rather than one model per domain: the record itself is the only part
+    that differs, and `ScrapedPayload` already carries which kind it is. A
+    per-domain pair meant every new scrape edited this file, the activity, the
+    workflow and the worker — four structural changes for one domain.
+    """
+
+    record: ScrapedPayload
     source_snapshot_id: uuid.UUID
     research_run_id: uuid.UUID | None = None
     asserted_by: str | None = None
 
 
-class IngestDebateOutput(Contract):
-    event_id: uuid.UUID
-    event_created: bool = False
-    """False means this debate was already known under this exact title."""
+class IngestRecordOutput(Contract):
+    """What one record put in the graph, in terms no domain owns.
 
-    participant_ids: tuple[uuid.UUID, ...] = ()
+    `subject_entity_id` is whatever the record was chiefly about — a debate, a
+    candidacy, an endorsement. Naming it `event_id` made the counters below,
+    which are identical for every domain, look debate-specific.
+    """
+
+    subject_entity_id: uuid.UUID
+    subject_created: bool = False
+    """False means the subject was already known under this identity."""
+
+    related_entity_ids: tuple[uuid.UUID, ...] = ()
     assertion_ids: tuple[uuid.UUID, ...] = ()
     claims_created: int = 0
     """Propositions nothing had asserted before."""
@@ -134,13 +154,42 @@ class FindEntitiesInput(Contract):
         default=None, description="Name or fragment to search for."
     )
     kind: EntityKind | None = Field(
-        default=None, description="Narrow to one kind, e.g. event or person."
+        default=None, description="Narrow to one kind, e.g. person or contest."
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class FindEventsInput(Contract):
+    """Events specifically, which need filters no other kind has.
+
+    Separate from FindEntitiesInput rather than a superset of it because the
+    single-activity version had to *infer* which query to run, and inferred it
+    from the date fields: asking for people within a date range silently
+    searched events instead, discarding `kind` entirely.
+    """
+
+    name: str | None = Field(
+        default=None, description="Name or fragment to search for."
+    )
+    participant_ids: tuple[uuid.UUID, ...] = Field(
+        default=(),
+        description=(
+            "Only events these entities took part in. Scopes the result to the "
+            "subject being researched instead of the graph as a whole. Plural "
+            "because a name can resolve to more than one person."
+        ),
+    )
+    jurisdiction_id: uuid.UUID | None = Field(
+        default=None, description="Only events held in this jurisdiction."
+    )
+    event_kind: PoliticalEventKind | None = Field(
+        default=None, description="Only events of this kind, e.g. debate."
     )
     occurred_after: datetime | None = Field(
-        default=None, description="For events: earliest date to consider."
+        default=None, description="Earliest date to consider."
     )
     occurred_before: datetime | None = Field(
-        default=None, description="For events: latest date to consider."
+        default=None, description="Latest date to consider."
     )
     limit: int = Field(default=20, ge=1, le=100)
 
@@ -155,6 +204,13 @@ class EntityMatchOutput(Contract):
 
 class FindEntitiesOutput(Contract):
     matches: tuple[EntityMatchOutput, ...] = ()
+    truncated: bool = False
+    """True when the limit hid further matches.
+
+    Callers must surface this. A capped list rendered as if it were complete
+    tells the model nothing else exists, so it re-describes what it cannot see —
+    which is the duplicate this lookup exists to prevent.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -162,7 +218,13 @@ class FindEntitiesOutput(Contract):
 # --------------------------------------------------------------------------
 
 
-class ResearchDebatesInput(Contract):
+class ResearchInput(Contract):
+    """What every agent-driven research workflow is asked for.
+
+    One model for all of them: a workflow that needed a different question would
+    be asking the agent something the scaffold cannot drive anyway.
+    """
+
     subject: str = Field(
         min_length=1,
         description="Politician or race to research, e.g. 'Abdul El-Sayed'.",
@@ -170,22 +232,28 @@ class ResearchDebatesInput(Contract):
     asserted_by: str | None = None
 
 
-class ResearchDebatesOutput(Contract):
-    research_run_id: uuid.UUID
-    debates_found: int = 0
-    debates_new: int = 0
-    """Debates not already in the graph. The number that actually matters."""
+class ResearchOutput(Contract):
+    """What one research run learned, counted the same way for every domain.
 
-    debates_already_known: int = 0
+    "records" rather than "debates" because the loop that fills these in does
+    not know what it is looping over — which is the point.
+    """
+
+    research_run_id: uuid.UUID
+    records_found: int = 0
+    records_new: int = 0
+    """Subjects not already in the graph. The number that actually matters."""
+
+    records_already_known: int = 0
     """Re-discoveries. A run of all re-discoveries has learned nothing."""
 
     claims_created: int = 0
     claims_corroborated: int = 0
     claims_unchanged: int = 0
     misaligned_count: int = 0
-    event_ids: tuple[uuid.UUID, ...] = ()
+    subject_entity_ids: tuple[uuid.UUID, ...] = ()
     skipped_urls: tuple[str, ...] = ()
-    """Sources that could not be fetched, so their debates were not stored."""
+    """Sources that could not be fetched, so their records were not stored."""
 
     @property
     def claims_recorded(self) -> int:

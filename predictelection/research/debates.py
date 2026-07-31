@@ -16,33 +16,22 @@ Precision is explicit rather than assumed: an agent that only read "September
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 import uuid
 
 from pydantic import Field
 
 from predictelection.sql import (
-    ClaimAssertion,
     EntityKind,
-    EntityMention,
-    EvidenceLocator,
     EventOccurrenceStatus,
-    FullSourceLocator,
     ParticipationRole,
     PoliticalEventKind,
-    ClaimOutcome,
-    RecordedClaim,
-    RecordOrigin,
     SourceKind,
-    SourceSnapshot,
     TimePrecision,
     Validity,
-    get_predicate_spec,
-    record_claim_from_source,
-    resolve_entity_mention,
 )
-from predictelection.research.archive import SourceArchive
+from predictelection.research.ingestion import Ingestion, IngestContext
 from predictelection.research.scraped import ScrapedEntity, ScrapedRecord
 
 
@@ -53,6 +42,8 @@ class ScrapedDebate(ScrapedRecord):
     prompt: there is no mapping layer between what the model emits and what gets
     stored, and no second place for the two to drift apart.
     """
+
+    record_type: Literal["debate"] = "debate"
 
     title: str = Field(
         min_length=1, max_length=500, description="Formal name or title of the debate."
@@ -95,79 +86,34 @@ class ScrapedDebate(ScrapedRecord):
         description="Full recording, ideally the host's official upload.",
     )
 
-
-@dataclass(frozen=True, slots=True)
-class DebateIngestion:
-    event_id: uuid.UUID
-    recorded: tuple[RecordedClaim, ...]
-    event_created: bool = False
-    """False means this debate was already in the graph under this title."""
-
-    participant_ids: tuple[uuid.UUID, ...] = field(default=())
-    video_source_id: uuid.UUID | None = None
-
     @property
-    def assertions(self) -> tuple[ClaimAssertion, ...]:
-        return tuple(item.assertion for item in self.recorded)
-
-    @property
-    def misaligned(self) -> tuple[ClaimAssertion, ...]:
-        return tuple(a for a in self.assertions if not a.ontology_aligned)
-
-    def count(self, outcome: ClaimOutcome) -> int:
-        return sum(1 for item in self.recorded if item.outcome is outcome)
+    def source_title(self) -> str | None:
+        return self.title
 
 
-def ingest_debate(
-    session,
-    *,
-    debate: ScrapedDebate,
-    snapshot: SourceSnapshot,
-    archive: SourceArchive | None = None,
-    research_run_id: uuid.UUID | None = None,
-    asserted_by: str | None = None,
-    locator: EvidenceLocator | None = None,
-    origin: RecordOrigin = RecordOrigin.MODEL,
-) -> DebateIngestion:
-    """Turn one scraped debate into resolved entities and attributed claims."""
+def ingest_debate(debate: ScrapedDebate, context: IngestContext) -> Ingestion:
+    """Turn one scraped debate into resolved entities and attributed claims.
 
-    where = locator or FullSourceLocator()
+    Two positional arguments, matching every other ingestor, so the registry can
+    dispatch to any of them without knowing which domain it is holding.
+    """
 
-    def assert_claim(
-        slug: str, *, subject_id, object_id=None, value=None, validity=None
-    ):
-        return record_claim_from_source(
-            session,
-            predicate=get_predicate_spec(slug),
-            subject_id=subject_id,
-            object_id=object_id,
-            value=value,
-            validity=validity,
-            source_snapshot_id=snapshot.id,
-            locator=where,
-            excerpt=debate.title,
-            research_run_id=research_run_id,
-            origin=origin,
-            asserted_by=asserted_by,
-        )
-
-    event = resolve_entity_mention(
-        session,
-        EntityMention(kind=EntityKind.EVENT, name=debate.title),
-    )
+    event = context.resolve(EntityKind.EVENT, debate.title)
     recorded = [
-        assert_claim(
+        context.record(
             "event_kind",
             subject_id=event.entity_id,
             value={"kind": PoliticalEventKind.DEBATE},
+            excerpt=debate.title,
         ),
-        assert_claim(
+        context.record(
             "event_occurrence",
             subject_id=event.entity_id,
             value={"status": debate.status},
             validity=Validity.between(
                 debate.starts_at, debate.ends_at, debate.starts_at_precision
             ),
+            excerpt=debate.title,
         ),
     ]
 
@@ -178,58 +124,54 @@ def ingest_debate(
         (debate.moderators, ParticipationRole.MODERATOR),
     ):
         for person in people:
-            resolved = resolve_entity_mention(
-                session, person.as_mention(EntityKind.PERSON)
-            )
-            if role is ParticipationRole.CANDIDATE:
-                participant_ids.append(resolved.entity_id)
+            resolved = context.resolve(EntityKind.PERSON, person)
+            participant_ids.append(resolved.entity_id)
             recorded.append(
-                assert_claim(
+                context.record(
                     "participated_in",
                     subject_id=resolved.entity_id,
                     object_id=event.entity_id,
                     value={"role": role},
+                    excerpt=person.name,
                 )
             )
 
     if debate.contest is not None:
-        contest = resolve_entity_mention(
-            session, debate.contest.as_mention(EntityKind.CONTEST)
-        )
+        contest = context.resolve(EntityKind.CONTEST, debate.contest)
         recorded.append(
-            assert_claim(
+            context.record(
                 "event_about_contest",
                 subject_id=event.entity_id,
                 object_id=contest.entity_id,
+                excerpt=debate.contest.name,
             )
         )
 
     if debate.jurisdiction is not None:
-        jurisdiction = resolve_entity_mention(
-            session, debate.jurisdiction.as_mention(EntityKind.JURISDICTION)
-        )
+        jurisdiction = context.resolve(EntityKind.JURISDICTION, debate.jurisdiction)
         recorded.append(
-            assert_claim(
+            context.record(
                 "event_in_jurisdiction",
                 subject_id=event.entity_id,
                 object_id=jurisdiction.entity_id,
+                excerpt=debate.jurisdiction.name,
             )
         )
 
     video_source_id = None
-    if debate.video_url is not None and archive is not None:
+    if debate.video_url is not None:
         # Registered, not fetched: downloading and transcribing is a separate
         # activity, and this is the row it will look for.
-        video_source_id = archive.source(
+        video_source_id = context.register_source(
             kind=SourceKind.VIDEO,
             canonical_url=debate.video_url,
             title=debate.title,
-        ).id
+        )
 
-    return DebateIngestion(
-        event_id=event.entity_id,
+    return Ingestion(
+        subject_entity_id=event.entity_id,
         recorded=tuple(recorded),
-        event_created=event.created,
-        participant_ids=tuple(participant_ids),
-        video_source_id=video_source_id,
+        subject_created=event.created,
+        related_entity_ids=tuple(participant_ids),
+        registered_source_ids=() if video_source_id is None else (video_source_id,),
     )
