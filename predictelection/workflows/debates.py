@@ -22,6 +22,8 @@ from temporalio.exceptions import ActivityError
 from predictelection.activities.contracts import (
     ArchiveUrlInput,
     ArchiveUrlOutput,
+    FindEntitiesInput,
+    FindEntitiesOutput,
     FinishResearchRunInput,
     FinishResearchRunOutput,
     IngestDebateInput,
@@ -36,12 +38,16 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.durable_exec.temporal import PydanticAIWorkflow
 
     from predictelection.agents.debates import DebateFindings, debate_agent
-    from predictelection.sql import ResearchRunStatus, SourceKind
+    from predictelection.sql import EntityKind, ResearchRunStatus, SourceKind
 
 
 WRITE_ACTIVITY = workflow.ActivityConfig(
     start_to_close_timeout=timedelta(seconds=60),
     retry_policy=RetryPolicy(maximum_attempts=5),
+)
+READ_ACTIVITY = workflow.ActivityConfig(
+    start_to_close_timeout=timedelta(seconds=30),
+    retry_policy=RetryPolicy(maximum_attempts=3),
 )
 FETCH_ACTIVITY = workflow.ActivityConfig(
     start_to_close_timeout=timedelta(seconds=90),
@@ -112,8 +118,25 @@ class ResearchDebatesWorkflow(PydanticAIWorkflow):
         return result
 
     async def _find_debates(self, subject: str) -> DebateFindings:
+        """Look up what is already recorded, then ask the agent.
+
+        The workflow fetches the context rather than the agent reaching for it.
+        A tool cannot: TemporalDurability runs each agent step *as an activity*,
+        and an activity cannot call execute_activity — wiring the lookup as a
+        tool hangs. Fetching here also matches the classic construction pipeline,
+        which links entities before extracting relations, and it keeps the agent
+        purely a reader.
+        """
+
+        known: FindEntitiesOutput = await workflow.execute_activity(
+            "find_entities",
+            FindEntitiesInput(kind=EntityKind.EVENT, limit=50),
+            result_type=FindEntitiesOutput,
+            **READ_ACTIVITY,
+        )
         run = await self.agent.run(
             f"Find the notable debates {subject} has taken part in."
+            + _already_recorded(known)
         )
         return run.output
 
@@ -177,3 +200,19 @@ class ResearchDebatesWorkflow(PydanticAIWorkflow):
             event_ids=tuple(event_ids),
             skipped_urls=tuple(skipped),
         )
+
+
+def _already_recorded(known: FindEntitiesOutput) -> str:
+    """Render existing events so the agent can echo a title back verbatim."""
+
+    if not known.matches:
+        return ""
+    lines = "\n".join(
+        f"- {match.canonical_name}"
+        + (f"  ({match.occurred_at:%Y-%m-%d})" if match.occurred_at else "")
+        for match in known.matches
+    )
+    return (
+        "\n\nALREADY RECORDED — reuse these titles exactly if you find the "
+        f"same debate:\n{lines}"
+    )

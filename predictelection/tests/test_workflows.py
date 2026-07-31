@@ -97,7 +97,7 @@ def _findings():
 
 
 _CALLS: list[int] = []
-_TOOL_CALLS: list[object] = []
+_PROMPTS: list[str] = []
 
 
 def _stub_model():
@@ -114,38 +114,15 @@ def _stub_model():
 
     def respond(messages, info: AgentInfo) -> ModelResponse:
         _CALLS.append(1)
-        # First turn: call the lookup tool, the way the instructions tell a real
-        # model to. This is the only place the tool -> activity path executes.
-        already_called = any(
-            getattr(part, "tool_name", None) == "run_code"
-            for message in messages
-            for part in getattr(message, "parts", [])
-        )
-        if already_called:
-            _TOOL_CALLS.append("returned")
-        if not already_called and any(
-            tool.name == "run_code" for tool in info.function_tools
-        ):
-            # CodeMode exposes tools inside a sandbox rather than as individual
-            # tool definitions, so the lookup is reached by writing code. This is
-            # the only place the whole chain runs: sandbox -> known_events ->
-            # workflow.execute_activity -> find_entities -> database.
-            _TOOL_CALLS.append("requested")
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "run_code",
-                        {
-                            "code": (
-                                "result = await known_events("
-                                "occurred_after='2026-09-01T00:00:00Z', "
-                                "occurred_before='2026-09-30T00:00:00Z')\n"
-                                "print(result)"
-                            )
-                        },
-                    )
-                ]
+        # Record the prompt so the test can prove the workflow fetched existing
+        # events and handed them to the agent.
+        _PROMPTS.append(
+            "\n".join(
+                str(getattr(part, "content", ""))
+                for message in messages
+                for part in getattr(message, "parts", [])
             )
+        )
         return ModelResponse(
             parts=[
                 ToolCallPart(
@@ -273,10 +250,8 @@ async def test_the_workflow_stores_only_what_it_can_cite(
     )
 
     assert _CALLS, "the stub model was never called, so the real provider ran"
-    # the tool -> activity path actually executed, rather than the branch being
-    # skipped because the tool was not registered
-    assert "requested" in _TOOL_CALLS, "the model never got offered known_events"
-    assert "returned" in _TOOL_CALLS, "the sandbox call never came back to the model"
+    # nothing was recorded before this run, so the context block is absent
+    assert not any("ALREADY RECORDED" in prompt for prompt in _PROMPTS)
     assert result.debates_found == 2
     assert result.debates_new == 1
     assert result.debates_already_known == 0
@@ -348,3 +323,37 @@ async def test_rerunning_the_workflow_does_not_duplicate(
     # per-run alignment is answerable again, rather than averaged across history
     for run_id in (first.research_run_id, second.research_run_id):
         assert ontology_alignment_score(read_session, research_run_id=run_id) == 1.0
+
+
+@pytest.mark.anyio
+async def test_the_second_run_is_shown_the_first_runs_titles(
+    workflow_env, committed_sessions, object_store, read_session: Session
+) -> None:
+    """The fix for 11 event entities standing for 6 real debates.
+
+    The agent re-described each debate because it could not see what it had
+    already written. The workflow now looks that up and puts it in the prompt, so
+    the model can echo a title back verbatim instead of inventing a new phrasing.
+
+    Fetched by the workflow rather than by an agent tool: TemporalDurability runs
+    each agent step as an activity, and an activity cannot call execute_activity,
+    so a tool for this hangs.
+    """
+
+    activities = ResearchActivities(
+        session_factory=committed_sessions, store=object_store, http=_http()
+    )
+    request = ResearchDebatesInput(subject="Abdul El-Sayed")
+
+    _PROMPTS.clear()
+    await _run_workflow(workflow_env.client, activities, request)
+    first_prompts = list(_PROMPTS)
+
+    _PROMPTS.clear()
+    await _run_workflow(workflow_env.client, activities, request)
+    second_prompts = list(_PROMPTS)
+
+    assert not any("ALREADY RECORDED" in p for p in first_prompts)
+    context = "\n".join(second_prompts)
+    assert "ALREADY RECORDED" in context
+    assert "2026 Michigan Gubernatorial Debate" in context
