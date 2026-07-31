@@ -30,6 +30,9 @@ from temporalio.exceptions import ApplicationError
 from predictelection.activities.contracts import (
     ArchiveUrlInput,
     ArchiveUrlOutput,
+    EntityMatchOutput,
+    FindEntitiesInput,
+    FindEntitiesOutput,
     FinishResearchRunInput,
     FinishResearchRunOutput,
     IngestDebateInput,
@@ -41,9 +44,12 @@ from predictelection.research.archive import SourceArchive
 from predictelection.research.debates import ingest_debate
 from predictelection.sql import (
     ClaimOutcome,
+    EntityKind,
     ResearchRun,
     ResearchRunStatus,
     SourceSnapshot,
+    find_entities,
+    find_events,
     get_or_create,
     idempotency_key,
 )
@@ -82,6 +88,7 @@ class ResearchActivities:
             self.finish_research_run,
             self.archive_url,
             self.ingest_debate,
+            self.find_entities,
         ]
 
     # ----------------------------------------------------------------------
@@ -141,6 +148,48 @@ class ResearchActivities:
             )
             return FinishResearchRunOutput(
                 research_run_id=run.id, status=request.status
+            )
+
+    @activity.defn(name="find_entities")
+    def find_entities(self, request: FindEntitiesInput) -> FindEntitiesOutput:
+        """Let the agent see what the graph already knows.
+
+        Read-only, so it is safe to repeat and cannot corrupt a retried run. The
+        canonical_name it returns is the point: an agent that echoes an existing
+        title back stops forking the entity.
+        """
+
+        with self._session_factory() as session:
+            if (
+                request.occurred_after
+                or request.occurred_before
+                or (request.kind is EntityKind.EVENT)
+            ):
+                matches = find_events(
+                    session,
+                    name=request.name,
+                    occurred_after=request.occurred_after,
+                    occurred_before=request.occurred_before,
+                    limit=request.limit,
+                )
+            else:
+                matches = find_entities(
+                    session,
+                    name=request.name,
+                    kind=request.kind,
+                    limit=request.limit,
+                )
+            return FindEntitiesOutput(
+                matches=tuple(
+                    EntityMatchOutput(
+                        entity_id=m.entity_id,
+                        kind=m.kind,
+                        canonical_name=m.canonical_name,
+                        aliases=m.aliases,
+                        occurred_at=m.occurred_at,
+                    )
+                    for m in matches
+                )
             )
 
     @activity.defn(name="archive_url")

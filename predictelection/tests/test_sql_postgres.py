@@ -147,7 +147,12 @@ def test_misaligned_claim_is_kept_flagged_and_queued(session: Session) -> None:
     spec = get_predicate_spec("endorsed")
     subject = f.make_entity(session, kind=EntityKind.JURISDICTION)
     obj = f.make_entity(session, kind=EntityKind.PERSON)
-    claim = new_claim(predicate=spec, subject_id=subject.id, object_id=obj.id)
+    claim = new_claim(
+        predicate=spec,
+        subject_id=subject.id,
+        object_id=obj.id,
+        value={"strength": "full"},
+    )
     session.add(claim)
 
     assertion = new_claim_assertion(
@@ -176,7 +181,12 @@ def test_misaligned_claim_is_kept_flagged_and_queued(session: Session) -> None:
 def test_aligned_claim_is_not_flagged_or_queued(session: Session) -> None:
     spec = get_predicate_spec("endorsed")
     subject_id, object_id = f.make_claim_subject_and_object(session, spec)
-    claim = new_claim(predicate=spec, subject_id=subject_id, object_id=object_id)
+    claim = new_claim(
+        predicate=spec,
+        subject_id=subject_id,
+        object_id=object_id,
+        value={"strength": "full"},
+    )
     session.add(claim)
 
     assertion = new_claim_assertion(
@@ -583,20 +593,27 @@ def test_identifier_namespace_is_normalized_to_satisfy_its_check(
     assert stored.namespace == "wikidata"
 
 
-def test_the_check_still_rejects_an_unnormalized_namespace(session: Session) -> None:
-    """Bypassing the ORM hook must still hit ck_..._namespace_normalized."""
+def test_an_unregistered_namespace_is_rejected(session: Session) -> None:
+    """The registry FK is a stronger guard than the old lowercase CHECK.
+
+    That CHECK only caught bad *casing*. A typo like 'wikdata' passed it happily
+    and then silently matched nothing forever. The foreign key catches both,
+    because a scheme has to exist before anything can claim an ID in it.
+    """
 
     entity = f.make_entity(session)
-    with pytest.raises(IntegrityError) as error:
-        session.execute(
-            insert(EntityIdentifier).values(
-                id=uuid.uuid4(),
-                entity_id=entity.id,
-                namespace="WikiData",
-                value="Q999",
+    for bad in ("WikiData", "wikdata"):
+        # savepoint, not rollback: rolling back would discard the entity too
+        with pytest.raises(IntegrityError) as error, session.begin_nested():
+            session.execute(
+                insert(EntityIdentifier).values(
+                    id=uuid.uuid4(),
+                    entity_id=entity.id,
+                    namespace=bad,
+                    value="Q999",
+                )
             )
-        )
-    assert "ck_entity_identifier_namespace_normalized" in str(error.value)
+        assert "fk_entity_identifier_namespace" in str(error.value)
 
 
 def test_resolve_entity_follows_a_redirect_chain(session: Session) -> None:

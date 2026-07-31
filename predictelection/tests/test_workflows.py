@@ -97,6 +97,7 @@ def _findings():
 
 
 _CALLS: list[int] = []
+_TOOL_CALLS: list[object] = []
 
 
 def _stub_model():
@@ -113,6 +114,38 @@ def _stub_model():
 
     def respond(messages, info: AgentInfo) -> ModelResponse:
         _CALLS.append(1)
+        # First turn: call the lookup tool, the way the instructions tell a real
+        # model to. This is the only place the tool -> activity path executes.
+        already_called = any(
+            getattr(part, "tool_name", None) == "run_code"
+            for message in messages
+            for part in getattr(message, "parts", [])
+        )
+        if already_called:
+            _TOOL_CALLS.append("returned")
+        if not already_called and any(
+            tool.name == "run_code" for tool in info.function_tools
+        ):
+            # CodeMode exposes tools inside a sandbox rather than as individual
+            # tool definitions, so the lookup is reached by writing code. This is
+            # the only place the whole chain runs: sandbox -> known_events ->
+            # workflow.execute_activity -> find_entities -> database.
+            _TOOL_CALLS.append("requested")
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "run_code",
+                        {
+                            "code": (
+                                "result = await known_events("
+                                "occurred_after='2026-09-01T00:00:00Z', "
+                                "occurred_before='2026-09-30T00:00:00Z')\n"
+                                "print(result)"
+                            )
+                        },
+                    )
+                ]
+            )
         return ModelResponse(
             parts=[
                 ToolCallPart(
@@ -240,6 +273,10 @@ async def test_the_workflow_stores_only_what_it_can_cite(
     )
 
     assert _CALLS, "the stub model was never called, so the real provider ran"
+    # the tool -> activity path actually executed, rather than the branch being
+    # skipped because the tool was not registered
+    assert "requested" in _TOOL_CALLS, "the model never got offered known_events"
+    assert "returned" in _TOOL_CALLS, "the sandbox call never came back to the model"
     assert result.debates_found == 2
     assert result.debates_new == 1
     assert result.debates_already_known == 0

@@ -58,6 +58,14 @@ def normalize_identifier_namespace(namespace: str) -> str:
 class EntityKind(StrEnum):
     PERSON = "person"
     ORGANIZATION = "organization"
+    PARTY = "party"
+    """Distinct from ORGANIZATION: party is load-bearing for elections.
+
+    Primaries belong to one, affiliation changes over time, and results are read
+    by party. Leaving it inside ORGANIZATION would make every one of those a
+    free-text guess.
+    """
+
     JURISDICTION = "jurisdiction"
     OFFICE = "office"
     ELECTION = "election"
@@ -101,7 +109,13 @@ class Entity(Base):
 
 
 class EntityIdentifier(Immutable, Base):
-    """An immutable identifier assigned by an external namespace."""
+    """An immutable identifier assigned by an external namespace.
+
+    Many per entity by design — Wikidata and OCD and FEC coexist rather than one
+    winning. `namespace` is a foreign key into the registry rather than free
+    text, so a typo cannot invent a scheme that silently matches nothing, and a
+    scheme can be deprecated without touching these rows.
+    """
 
     __tablename__ = "entity_identifier"
 
@@ -109,8 +123,16 @@ class EntityIdentifier(Immutable, Base):
     entity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("entity.id", ondelete="RESTRICT")
     )
-    namespace: Mapped[str] = mapped_column(String(64))
+    namespace: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("identifier_namespace.namespace", ondelete="RESTRICT"),
+    )
     value: Mapped[str] = mapped_column(Text)
+    research_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("research_run.id", ondelete="RESTRICT")
+    )
+    """Which run asserted this. Everything else here is citable; so is this."""
+
     created_at: Mapped[created_at_timestamp]
 
     entity: Mapped[Entity] = relationship(back_populates="identifiers")
@@ -121,11 +143,8 @@ class EntityIdentifier(Immutable, Base):
             "value",
             name="uq_entity_identifier_namespace_value",
         ),
-        CheckConstraint(
-            "namespace = lower(btrim(namespace)) AND namespace <> ''",
-            name="namespace_normalized",
-        ),
         Index("ix_entity_identifier_entity_id", "entity_id"),
+        Index("ix_entity_identifier_research_run_id", "research_run_id"),
     )
 
 

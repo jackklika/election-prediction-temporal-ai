@@ -46,6 +46,7 @@ EXPECTED_TABLES = {
     "entity",
     "entity_alias",
     "entity_identifier",
+    "identifier_namespace",
     "entity_redirect",
     "evidence_anchor",
     "political_event_projection",
@@ -243,14 +244,35 @@ def test_new_claim_validates_target_and_temporal_contract():
         predicate=participated_in,
         subject_id=subject_id,
         object_id=object_id,
+        value={"role": "candidate"},
     )
 
     assert claim.object_id == object_id
-    assert claim.value is None
+    assert claim.value == {"role": "candidate"}
     assert len(claim.fingerprint) == 64
 
+    # qualified predicates need both halves
     with pytest.raises(ValueError, match="requires an object"):
-        new_claim(predicate=participated_in, subject_id=subject_id)
+        new_claim(
+            predicate=participated_in,
+            subject_id=subject_id,
+            value={"role": "candidate"},
+        )
+    with pytest.raises(ValueError, match="requires a value"):
+        new_claim(
+            predicate=participated_in,
+            subject_id=subject_id,
+            object_id=object_id,
+        )
+
+    # and the role is part of identity: a moderator is not a debater
+    moderator = new_claim(
+        predicate=participated_in,
+        subject_id=subject_id,
+        object_id=object_id,
+        value={"role": "moderator"},
+    )
+    assert moderator.fingerprint != claim.fingerprint
 
     event_kind = get_predicate_spec("event_kind")
     with pytest.raises(ValueError, match="does not accept temporal"):

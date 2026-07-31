@@ -1,8 +1,17 @@
-# Political Prediction
+# ElectAlpha
 
-This project is a tool to use to help predict elections. It interacts with Kalshi API to get election odds for previous or current races, and uses AI analysis and research to suggest odds and optionally place orders.
+This project is a tool to use to collect citable infromation about elections, with the goal to run analysis on these facts. It interacts with data sources to collect facts about a race and candidate, and uses an agent to research and populate a knowledge graph.
 
-We use Temporal for its durable execution guarentees to handle workflows.
+For example, we can break elections down into Candidates that run in Races which have Outcomes, participate with other Candidates in Events like Debates where the candidates produce Speech, have Polls run against them. These Races take places in Geographies that can be represented by polygons, and Populations vote for Candidates which results in Outcomes.
+
+This is the "map" part of ["The Map is not the Territory"](https://en.wikipedia.org/wiki/Map%E2%80%93territory_relation). The further goal is to use this knowledge graph as a broad map which can then be enriched by private data or expert experience to create electoral theories that can be backtested.
+
+# Technical decisions
+
+- Postgres stores ontology models for claims, entities, and links between them. It was chosen because Postgres is familiar to me and is a solid foundation for an MVP. If this was a sparse KG, it may not be as good of a fit, but we are trying to keep it dense. If needed, we can extend it with Apache AGE, or migrate the data to a more comprehensive graph database.
+- Temporal is used for workflow execution. Pydantic AI Agents have native integration with it, the durable execution model is useful for non-deterministic LLM inferrence and handling failures, and it provides a great interface for interacting with long-running workflows.
+- S3 or Google Cloud Storage Objects are used because where else would we cheaply store scraped artifacts? Minio is used during development for integration testing, even though it is archived, because it seems stable and is only used locally for testing.
+- Python is the standard for these kinds of AI projects. Speed is not a top concern. And I am very familiar with this ecosystem. uv is also the current standard for dependency management in python.
 
 # Goals
 

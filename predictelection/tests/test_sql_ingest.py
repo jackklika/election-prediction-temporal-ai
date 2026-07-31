@@ -264,6 +264,7 @@ def test_ingestion_flags_a_misaligned_claim_without_dropping_it(
         predicate=spec,
         subject_id=subject.id,
         object_id=obj.id,
+        value={"strength": "full"},
         source_snapshot_id=f.make_snapshot(session).id,
         locator=FullSourceLocator(),
     )

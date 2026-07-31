@@ -12,6 +12,8 @@ quietly omit one.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from predictelection.sql import EntityKind, EntityMention, ExternalIdentifier
@@ -50,20 +52,42 @@ class ScrapedEntity(ScrapedModel):
             "different people. Leave null when unsure."
         ),
     )
+    ocd_id: str | None = Field(
+        default=None,
+        pattern=r"^ocd-(division|jurisdiction)/.+$",
+        description=(
+            "Open Civic Data ID such as ocd-division/country:us/state:wi. The "
+            "best identifier for a US jurisdiction. Leave null when unsure."
+        ),
+    )
+    fec_id: str | None = Field(
+        default=None,
+        max_length=32,
+        description="FEC candidate or committee ID, for US federal races.",
+    )
+
+    _IDENTIFIER_FIELDS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("wikidata", "wikidata_id"),
+        ("ocd-division", "ocd_id"),
+        ("fec", "fec_id"),
+    )
+    """Field-to-namespace map. Named fields because a model fills in `ocd_id`
+    far more reliably than a free-form namespace/value pair — but the mapping is
+    a table rather than an if-chain, so adding a scheme is one row here and one
+    row in the registry, and no resolution code names a namespace."""
 
     def as_mention(self, kind: EntityKind) -> EntityMention:
         """Hand this to resolve_entity_mention to get a stable entity ID.
 
-        Identifiers are named fields rather than a generic namespace/value list
-        because a model fills in `wikidata_id` far more reliably than it fills in
-        a free-form pair. Adding fec_id or ballotpedia_slug later is one field
-        here and one line below.
+        Every identifier the source offered is carried, not just the first.
+        Schemes coexist and outlive each other; resolution decides which wins by
+        the registry's precedence, so nothing here has to.
         """
 
-        identifiers = (
-            (ExternalIdentifier(namespace="wikidata", value=self.wikidata_id),)
-            if self.wikidata_id
-            else ()
+        identifiers = tuple(
+            ExternalIdentifier(namespace=namespace, value=value)
+            for namespace, field in self._IDENTIFIER_FIELDS
+            if (value := getattr(self, field))
         )
         return EntityMention(kind=kind, name=self.name, identifiers=identifiers)
 

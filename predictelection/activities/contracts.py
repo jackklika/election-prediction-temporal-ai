@@ -19,7 +19,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from predictelection.research.debates import ScrapedDebate
-from predictelection.sql import ResearchRunStatus, SourceKind
+from predictelection.sql import EntityKind, ResearchRunStatus, SourceKind
 
 
 class Contract(BaseModel):
@@ -122,6 +122,39 @@ class IngestDebateOutput(Contract):
     They are stored and queued for review rather than dropped, so this is a
     quality signal about the extraction, not a failure count.
     """
+
+
+# --------------------------------------------------------------------------
+# Lookup — what the agent reads before it writes
+# --------------------------------------------------------------------------
+
+
+class FindEntitiesInput(Contract):
+    name: str | None = Field(
+        default=None, description="Name or fragment to search for."
+    )
+    kind: EntityKind | None = Field(
+        default=None, description="Narrow to one kind, e.g. event or person."
+    )
+    occurred_after: datetime | None = Field(
+        default=None, description="For events: earliest date to consider."
+    )
+    occurred_before: datetime | None = Field(
+        default=None, description="For events: latest date to consider."
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class EntityMatchOutput(Contract):
+    entity_id: uuid.UUID
+    kind: EntityKind
+    canonical_name: str
+    aliases: tuple[str, ...] = ()
+    occurred_at: datetime | None = None
+
+
+class FindEntitiesOutput(Contract):
+    matches: tuple[EntityMatchOutput, ...] = ()
 
 
 # --------------------------------------------------------------------------

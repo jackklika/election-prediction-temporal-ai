@@ -212,6 +212,28 @@ def _validate_temporal_shape(
         raise ValueError("valid_to must be later than valid_from")
 
 
+def _validate_payload_shape(
+    target_kind: PredicateTarget,
+    *,
+    object_id: uuid.UUID | None,
+    value: object | None,
+) -> None:
+    """Enforce the object/value shape the predicate's target kind demands.
+
+    Mirrors ck_claim_target_matches_payload so the failure arrives with a useful
+    message rather than as a constraint violation at flush.
+    """
+
+    if target_kind is PredicateTarget.ENTITY:
+        if object_id is None or value is not None:
+            raise ValueError("entity claims require an object and no value")
+    elif target_kind is PredicateTarget.QUALIFIED:
+        if object_id is None or value is None:
+            raise ValueError("qualified claims require both an object and a value")
+    elif object_id is not None or value is None:
+        raise ValueError("value claims require a value and no object")
+
+
 def build_claim_fingerprint(
     *,
     predicate_version_id: uuid.UUID,
@@ -228,11 +250,7 @@ def build_claim_fingerprint(
 ) -> str:
     """Return the stable semantic identity for an immutable claim."""
 
-    if target_kind is PredicateTarget.ENTITY:
-        if object_id is None or value is not None:
-            raise ValueError("entity claims require an object and no value")
-    elif object_id is not None or value is None:
-        raise ValueError("value claims require a value and no object")
+    _validate_payload_shape(target_kind, object_id=object_id, value=value)
 
     _validate_temporal_shape(
         valid_at=valid_at,
@@ -329,6 +347,12 @@ class Claim(Immutable, Base):
             (
                 target_kind = 'value'
                 AND object_id IS NULL
+                AND value IS NOT NULL
+            )
+            OR
+            (
+                target_kind = 'qualified'
+                AND object_id IS NOT NULL
                 AND value IS NOT NULL
             )
             """,
@@ -446,11 +470,11 @@ def _validate_claim_contract(
         )
 
     serialized_value = predicate.validate_value(value)
-    if target_kind is PredicateTarget.ENTITY:
-        if object_id is None:
-            raise ValueError(f"{predicate.slug} requires an object entity")
-    elif object_id is not None:
-        raise ValueError(f"{predicate.slug} does not take an object entity")
+    if target_kind is PredicateTarget.VALUE:
+        if object_id is not None:
+            raise ValueError(f"{predicate.slug} does not take an object entity")
+    elif object_id is None:
+        raise ValueError(f"{predicate.slug} requires an object entity")
 
     _validate_temporal_shape(
         valid_at=valid_at,

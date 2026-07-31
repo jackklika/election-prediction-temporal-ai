@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from predictelection.sql.base import (
     Base,
+    CanonicalDecimal,
     Immutable,
     canonical_json_sha256,
     created_at_timestamp,
@@ -34,8 +35,20 @@ _PREDICATE_VERSION_ID_NAMESPACE = uuid.UUID("43157bf4-86e2-484f-b36a-bbde3717d53
 
 
 class PredicateTarget(StrEnum):
+    """What a claim points at besides its subject.
+
+    QUALIFIED is the n-ary case: subject, object, *and* a payload. The formal
+    definition of a knowledge graph admits n-ary facts alongside binary triples,
+    and the alternative — reifying the relationship as its own entity — roughly
+    doubles the graph and produces entities with no canonical name, which cannot
+    be resolved on a re-scrape. A moderator and a candidate both "participated
+    in" a debate; only the role separates them, and it is not a thing in the
+    world that deserves its own identity.
+    """
+
     ENTITY = "entity"
     VALUE = "value"
+    QUALIFIED = "qualified"
 
 
 class TemporalMode(StrEnum):
@@ -61,6 +74,32 @@ class EventOccurrenceStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ParticipationRole(StrEnum):
+    """Why someone was at an event. Without it, a moderator reads as a debater."""
+
+    CANDIDATE = "candidate"
+    MODERATOR = "moderator"
+    PANELIST = "panelist"
+    HOST = "host"
+    OTHER = "other"
+
+
+class EndorsementStrength(StrEnum):
+    FULL = "full"
+    QUALIFIED = "qualified"
+    """Backed with reservations stated by the endorser."""
+
+    WITHDRAWN = "withdrawn"
+
+
+class ContestStage(StrEnum):
+    PRIMARY = "primary"
+    RUNOFF = "runoff"
+    GENERAL = "general"
+    SPECIAL = "special"
+    CAUCUS = "caucus"
+
+
 class PredicateValue(BaseModel):
     """Base for the JSON value of one literal predicate."""
 
@@ -69,6 +108,46 @@ class PredicateValue(BaseModel):
 
 class EventKindValue(PredicateValue):
     kind: PoliticalEventKind
+
+
+class ParticipationValue(PredicateValue):
+    role: ParticipationRole
+
+
+class EndorsementValue(PredicateValue):
+    strength: EndorsementStrength = EndorsementStrength.FULL
+    context: str | None = Field(default=None, max_length=500)
+
+
+class ContestStageValue(PredicateValue):
+    stage: ContestStage
+
+
+class ContestResultValue(PredicateValue):
+    """One candidate's result in one contest.
+
+    CanonicalDecimal, not Decimal: Pydantic serializes Decimal to a
+    scale-preserving string, so "48.7" and "48.70" would be the same result with
+    two fingerprints and would not deduplicate.
+    """
+
+    votes: int | None = Field(default=None, ge=0)
+    share: CanonicalDecimal | None = Field(default=None, ge=0, le=100)
+    place: int | None = Field(default=None, ge=1)
+    won: bool = False
+    """Explicit rather than derived from place: multi-winner contests exist."""
+
+
+class AssessmentValue(PredicateValue):
+    """A judgement one party made about another — a critic's read, a rating.
+
+    Stored as a claim about the *assessor*, which is what makes it checkable:
+    "Crowley was weakest" is unverifiable, "Murphy assessed Crowley as weakest"
+    is a fact about a citable column.
+    """
+
+    rating: str = Field(min_length=1, max_length=100)
+    basis: str | None = Field(default=None, max_length=500)
 
 
 class EventOccurrenceValue(PredicateValue):
@@ -164,7 +243,7 @@ class PredicateVersion(Immutable, Base):
             )
             OR
             (
-                target_kind = 'value'
+                target_kind IN ('value', 'qualified')
                 AND value_model_path IS NOT NULL
                 AND value_schema IS NOT NULL
             )
@@ -229,7 +308,6 @@ class PredicateSpec:
     """The Python source of truth used to seed a PredicateVersion."""
 
     slug: str
-    version: int
     label: str
     description: str
     target_kind: PredicateTarget
@@ -237,6 +315,14 @@ class PredicateSpec:
     subject_kinds: tuple[EntityKind, ...]
     object_kinds: tuple[EntityKind, ...] = ()
     value_model: type[PredicateValue] | None = None
+    version: int = 1
+    """Bump when a contract changes meaning.
+
+    Claims fingerprint against predicate_version_id, so a stored claim keeps
+    pointing at the contract it was written under. seed_predicates refuses to
+    reinterpret existing claims silently: edit a spec without bumping and it
+    raises rather than changing what old rows mean.
+    """
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]*", self.slug) is None:
@@ -249,6 +335,11 @@ class PredicateSpec:
             if not self.object_kinds or self.value_model is not None:
                 raise ValueError(
                     "entity predicates require object kinds and no value model"
+                )
+        elif self.target_kind is PredicateTarget.QUALIFIED:
+            if not self.object_kinds or self.value_model is None:
+                raise ValueError(
+                    "qualified predicates require both object kinds and a value model"
                 )
         elif self.object_kinds or self.value_model is None:
             raise ValueError(
@@ -310,31 +401,32 @@ class PredicateSpec:
 PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     PredicateSpec(
         slug="participated_in",
-        version=1,
         label="Participated in",
-        description="The subject participated in the event represented by the object.",
-        target_kind=PredicateTarget.ENTITY,
+        description=(
+            "The subject took part in the event, in the stated role. Without the "
+            "role a moderator is indistinguishable from a debater."
+        ),
+        target_kind=PredicateTarget.QUALIFIED,
         temporal_mode=TemporalMode.OPTIONAL,
         subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION),
         object_kinds=(EntityKind.EVENT,),
+        value_model=ParticipationValue,
     ),
     PredicateSpec(
         slug="endorsed",
-        version=1,
         label="Endorsed",
-        description="The subject publicly endorsed the object.",
-        target_kind=PredicateTarget.ENTITY,
-        temporal_mode=TemporalMode.OPTIONAL,
-        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION),
-        object_kinds=(
-            EntityKind.PERSON,
-            EntityKind.ORGANIZATION,
-            EntityKind.OPTION,
+        description=(
+            "The subject publicly backed the object, at the stated strength. A "
+            "withdrawn endorsement is a new claim over a later interval."
         ),
+        target_kind=PredicateTarget.QUALIFIED,
+        temporal_mode=TemporalMode.OPTIONAL,
+        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION, EntityKind.PARTY),
+        object_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION, EntityKind.OPTION),
+        value_model=EndorsementValue,
     ),
     PredicateSpec(
         slug="candidate_in",
-        version=1,
         label="Candidate in",
         description="The subject was or is a candidate in the contest.",
         target_kind=PredicateTarget.ENTITY,
@@ -344,7 +436,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="event_kind",
-        version=1,
         label="Event kind",
         description="The normalized kind assigned to a political event.",
         target_kind=PredicateTarget.VALUE,
@@ -354,7 +445,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="public_statement",
-        version=1,
         label="Public statement",
         description="A normalized policy or political position stated by the subject.",
         target_kind=PredicateTarget.VALUE,
@@ -368,7 +458,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     # a geography, which is what crosstab and correlation queries are built on.
     PredicateSpec(
         slug="contest_of_election",
-        version=1,
         label="Contest of election",
         description="The contest is one of the races decided in the given election.",
         target_kind=PredicateTarget.ENTITY,
@@ -378,7 +467,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="contest_for_office",
-        version=1,
         label="Contest for office",
         description="The contest determines who holds the given office.",
         target_kind=PredicateTarget.ENTITY,
@@ -388,7 +476,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="office_for_jurisdiction",
-        version=1,
         label="Office for jurisdiction",
         description="The office represents or governs the given jurisdiction.",
         # Optional rather than timeless: districts are redrawn, so the pairing
@@ -400,7 +487,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="contest_in_jurisdiction",
-        version=1,
         label="Contest in jurisdiction",
         description="The contest is decided by voters of the given jurisdiction.",
         target_kind=PredicateTarget.ENTITY,
@@ -410,7 +496,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="market_for_contest",
-        version=1,
         label="Market for contest",
         description="The prediction market settles on the outcome of the contest.",
         target_kind=PredicateTarget.ENTITY,
@@ -420,7 +505,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="event_about_contest",
-        version=1,
         label="Event about contest",
         description="The event concerns the given contest, such as its debate.",
         target_kind=PredicateTarget.ENTITY,
@@ -430,7 +514,6 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="event_in_jurisdiction",
-        version=1,
         label="Event in jurisdiction",
         description="The event took place in the given jurisdiction.",
         target_kind=PredicateTarget.ENTITY,
@@ -440,13 +523,90 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         slug="event_occurrence",
-        version=1,
         label="Event occurrence",
         description="Whether an event is scheduled or happened, over its interval.",
         target_kind=PredicateTarget.VALUE,
         temporal_mode=TemporalMode.REQUIRED,
         subject_kinds=(EntityKind.EVENT,),
         value_model=EventOccurrenceValue,
+    ),
+    # Outcomes. Without these there is nothing to backtest a theory against.
+    # Modelled as claims rather than their own table so recounts and
+    # certifications supersede like any other correction, and so a result cites
+    # the canvass it came from.
+    PredicateSpec(
+        slug="contest_result",
+        label="Contest result",
+        description=(
+            "How the subject placed in the contest. Supersede rather than edit "
+            "as counts move from election night to certified."
+        ),
+        target_kind=PredicateTarget.QUALIFIED,
+        temporal_mode=TemporalMode.OPTIONAL,
+        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION, EntityKind.OPTION),
+        object_kinds=(EntityKind.CONTEST,),
+        value_model=ContestResultValue,
+    ),
+    # Contest structure. A primary and a general are separate contests with
+    # different candidates, polls, and outcomes; they meet at the office.
+    PredicateSpec(
+        slug="contest_stage",
+        label="Contest stage",
+        description="Which stage of the process this contest is.",
+        target_kind=PredicateTarget.VALUE,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        value_model=ContestStageValue,
+    ),
+    PredicateSpec(
+        slug="contest_party",
+        label="Contest party",
+        description="The party whose nomination this contest decides.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        object_kinds=(EntityKind.PARTY,),
+    ),
+    PredicateSpec(
+        slug="advances_to",
+        label="Advances to",
+        description="The winner of this contest goes on to the object contest.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        object_kinds=(EntityKind.CONTEST,),
+    ),
+    PredicateSpec(
+        slug="party_affiliation",
+        label="Party affiliation",
+        description=(
+            "The subject belonged to the party. Optional temporal because "
+            "people switch, and the graph should keep both."
+        ),
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.OPTIONAL,
+        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION),
+        object_kinds=(EntityKind.PARTY,),
+    ),
+    # Opinion. The subject is the assessor, which is what makes an unverifiable
+    # judgement into a checkable fact about a citable source.
+    PredicateSpec(
+        slug="assessed",
+        label="Assessed",
+        description=(
+            "The subject publicly judged the object. Records that the "
+            "assessment was made, not that it was correct."
+        ),
+        target_kind=PredicateTarget.QUALIFIED,
+        temporal_mode=TemporalMode.REQUIRED,
+        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION),
+        object_kinds=(
+            EntityKind.PERSON,
+            EntityKind.ORGANIZATION,
+            EntityKind.EVENT,
+            EntityKind.CONTEST,
+        ),
+        value_model=AssessmentValue,
     ),
 )
 

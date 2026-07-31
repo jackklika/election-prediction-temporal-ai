@@ -29,6 +29,7 @@ from predictelection.sql import (
     EvidenceLocator,
     EventOccurrenceStatus,
     FullSourceLocator,
+    ParticipationRole,
     PoliticalEventKind,
     ClaimOutcome,
     RecordedClaim,
@@ -73,7 +74,14 @@ class ScrapedDebate(ScrapedRecord):
         description="Whether it happened, is upcoming, was postponed, or cancelled.",
     )
     participants: tuple[ScrapedEntity, ...] = Field(
-        default=(), description="The people who debated."
+        default=(), description="The candidates who debated each other."
+    )
+    moderators: tuple[ScrapedEntity, ...] = Field(
+        default=(),
+        description=(
+            "Anyone who ran the debate rather than competing in it — moderators, "
+            "panelists, hosts. Do not list them as participants."
+        ),
     )
     contest: ScrapedEntity | None = Field(
         default=None,
@@ -163,17 +171,26 @@ def ingest_debate(
         ),
     ]
 
+    # Role is what separates a debater from the person asking the questions.
     participant_ids: list[uuid.UUID] = []
-    for person in debate.participants:
-        resolved = resolve_entity_mention(session, person.as_mention(EntityKind.PERSON))
-        participant_ids.append(resolved.entity_id)
-        recorded.append(
-            assert_claim(
-                "participated_in",
-                subject_id=resolved.entity_id,
-                object_id=event.entity_id,
+    for people, role in (
+        (debate.participants, ParticipationRole.CANDIDATE),
+        (debate.moderators, ParticipationRole.MODERATOR),
+    ):
+        for person in people:
+            resolved = resolve_entity_mention(
+                session, person.as_mention(EntityKind.PERSON)
             )
-        )
+            if role is ParticipationRole.CANDIDATE:
+                participant_ids.append(resolved.entity_id)
+            recorded.append(
+                assert_claim(
+                    "participated_in",
+                    subject_id=resolved.entity_id,
+                    object_id=event.entity_id,
+                    value={"role": role},
+                )
+            )
 
     if debate.contest is not None:
         contest = resolve_entity_mention(

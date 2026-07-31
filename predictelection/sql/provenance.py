@@ -70,9 +70,25 @@ class Source(Base):
         ForeignKey("entity.id", ondelete="RESTRICT")
     )
     publisher_name: Mapped[str | None] = mapped_column(Text)
+    author_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("entity.id", ondelete="RESTRICT"),
+        name="author_entity_id",
+    )
+    """Who wrote it, when that is a person rather than an outlet.
+
+    For an opinion column the author is the most important attribute, because
+    the claims extracted from it are that person's judgements — recorded as
+    `assessed` claims whose subject is them. A plain FK rather than reifying
+    Source as an Entity: it answers "everything this author wrote" without
+    giving every source a second identity to resolve.
+    """
+
+    author_name: Mapped[str | None] = mapped_column(Text)
+    """The byline as printed, kept even when the author is not yet resolved."""
     created_at: Mapped[created_at_timestamp]
 
     publisher: Mapped[Entity | None] = relationship(foreign_keys=[publisher_id])
+    author: Mapped[Entity | None] = relationship(foreign_keys=[author_id])
     snapshots: Mapped[list[SourceSnapshot]] = relationship(
         back_populates="source",
         passive_deletes="all",
@@ -81,6 +97,7 @@ class Source(Base):
     __table_args__ = (
         UniqueConstraint("canonical_url", name="uq_source_canonical_url"),
         Index("ix_source_publisher_id", "publisher_id"),
+        Index("ix_source_author_entity_id", "author_entity_id"),
     )
 
 
