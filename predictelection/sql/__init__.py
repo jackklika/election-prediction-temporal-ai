@@ -136,6 +136,7 @@ from predictelection.sql.ingest import (
 )
 from predictelection.sql.lookup import (
     EntityMatch,
+    EntityMatches,
     find_entities,
     find_events,
 )
@@ -174,6 +175,7 @@ __all__ = [
     "EntityIdentifier",
     "EntityKind",
     "EntityMatch",
+    "EntityMatches",
     "EntityMention",
     "EntityRedirect",
     "EventKindValue",

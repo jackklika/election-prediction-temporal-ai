@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from predictelection.sql import (
     EntityKind,
     EntityMention,
+    PoliticalEventKind,
     TimePrecision,
     Validity,
     find_entities,
@@ -133,6 +134,125 @@ def test_lookup_is_scoped_by_kind(session: Session) -> None:
     people = find_entities(session, name="Washington", kind=EntityKind.PERSON)
     assert len(people) == 1
     assert people[0].kind is EntityKind.PERSON
+
+
+def test_truncation_is_reported_rather_than_silent(session: Session) -> None:
+    """A capped list rendered as complete is what licenses the duplicate.
+
+    The prompt block used to say "ALREADY RECORDED" over whatever fit under the
+    limit, with no way for the caller to know anything had been dropped. To a
+    model, a list that does not mention it is partial means nothing else exists.
+    """
+
+    for index in range(5):
+        _debate(session, f"Debate {index}", datetime(2026, 6, index + 1, tzinfo=UTC))
+
+    capped = find_events(session, limit=3)
+    assert len(capped) == 3
+    assert capped.truncated is True
+
+    complete = find_events(session, limit=5)
+    assert len(complete) == 5
+    assert complete.truncated is False
+
+
+def test_capping_keeps_the_most_recent_events(session: Session) -> None:
+    """Ordering decides what a cap throws away.
+
+    Ordered by canonical_name, the limit kept whatever sorted first — so a graph
+    with more events than the cap showed the agent an alphabetical slice
+    unrelated to what it was asked about. Recency at least drops the least
+    relevant rows.
+    """
+
+    _debate(session, "Zulu debate", datetime(2026, 9, 1, tzinfo=UTC))
+    _debate(session, "Alpha debate", datetime(2026, 1, 1, tzinfo=UTC))
+    _debate(session, "Bravo debate", datetime(2026, 5, 1, tzinfo=UTC))
+
+    kept = find_events(session, limit=2)
+    assert [m.canonical_name for m in kept] == ["Zulu debate", "Bravo debate"]
+    assert kept.truncated is True
+
+
+def test_events_are_scoped_to_who_took_part(session: Session) -> None:
+    """The bug this exists to prevent: showing one subject another's events."""
+
+    subject = resolve_entity_mention(
+        session, EntityMention(kind=EntityKind.PERSON, name="Abdul El-Sayed")
+    )
+    theirs = _debate(session, "A debate they were in", datetime(2026, 6, 1, tzinfo=UTC))
+    _debate(session, "A debate they were not in", datetime(2026, 7, 1, tzinfo=UTC))
+    get_or_create_claim(
+        session,
+        predicate=get_predicate_spec("participated_in"),
+        subject_id=subject.entity_id,
+        object_id=theirs.entity_id,
+        value={"role": "candidate"},
+    )
+    session.flush()
+
+    scoped = find_events(session, participant_ids=(subject.entity_id,))
+    assert [m.canonical_name for m in scoped] == ["A debate they were in"]
+
+    # unscoped still sees both, so the filter is doing the work, not the fixture
+    assert len(find_events(session)) == 2
+
+
+def test_events_are_scoped_by_kind(session: Session) -> None:
+    """Rallies and town halls are EVENT entities too.
+
+    Without this filter, the debate prompt lists every other kind of event as
+    something it has already reported as a debate.
+    """
+
+    debate = _debate(session, "A televised debate", datetime(2026, 6, 1, tzinfo=UTC))
+    rally = _debate(session, "A campaign rally", datetime(2026, 7, 1, tzinfo=UTC))
+    for event, kind in ((debate, "debate"), (rally, "town_hall")):
+        get_or_create_claim(
+            session,
+            predicate=get_predicate_spec("event_kind"),
+            subject_id=event.entity_id,
+            value={"kind": kind},
+        )
+    session.flush()
+
+    debates = find_events(session, event_kind=PoliticalEventKind.DEBATE)
+    assert [m.canonical_name for m in debates] == ["A televised debate"]
+
+
+def test_find_events_matches_aliases_like_find_entities_does(
+    session: Session,
+) -> None:
+    """An event renamed after ingestion was unfindable under its old title.
+
+    find_entities matched aliases and find_events did not, so the one lookup
+    built for events was the one that could not see the name the agent had
+    already used — a fork with no way back.
+    """
+
+    event = resolve_entity_mention(
+        session,
+        EntityMention(
+            kind=EntityKind.EVENT,
+            name="2026 Michigan Gubernatorial Debate",
+            aliases=("WOOD TV8 Grand Rapids Debate",),
+        ),
+    )
+    get_or_create_claim(
+        session,
+        predicate=get_predicate_spec("event_occurrence"),
+        subject_id=event.entity_id,
+        value={"status": "occurred"},
+        validity=Validity.between(
+            datetime(2026, 6, 20, tzinfo=UTC), None, TimePrecision.DAY
+        ),
+    )
+    session.flush()
+
+    by_alias = find_events(session, name="WOOD TV8")
+    assert [m.canonical_name for m in by_alias] == [
+        "2026 Michigan Gubernatorial Debate"
+    ]
 
 
 def test_lookup_writes_nothing(session: Session) -> None:

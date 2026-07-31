@@ -10,17 +10,22 @@ dependencies = [
     "pydantic-ai[temporal]>=2.19.0",
     "pydantic-ai-harness[code-mode,codemode,temporal]>=0.14.0",
     "pydantic-settings>=2.14.2",
-    "pytest>=9.1.1",
     "sqlalchemy>=2.0.51",
     "temporalio>=1.30.0",
     "pydantic-monty>=0.0.19",
     "boto3>=1.43.60",
+    "httpx>=0.28.1",
+    "logfire>=4.28.0",
+    "alembic>=1.16.0",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.15.20",
     "ty>=0.0.57",
+    "pytest>=9.1.1",
+    # backs @pytest.mark.anyio in the workflow tests; arrives via httpx today
+    "anyio>=4.11.0",
 ]
 
 [tool.pytest.ini_options]
@@ -28,6 +33,9 @@ dev = [
 # `python -m pytest`, which puts the cwd on sys.path; plain `pytest` fails.
 pythonpath = ["."]
 testpaths = ["predictelection/tests"]
+# Without this a typo'd marker is silently a no-op, so a test meant to need
+# Postgres quietly runs (and passes) without it.
+addopts = "--strict-markers"
 markers = [
     "postgres: needs a live PostgreSQL (skipped unless --require-postgres or a reachable POSTGRES_URL)",
 ]

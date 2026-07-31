@@ -6,9 +6,28 @@ from sqlalchemy.orm import Session, sessionmaker
 from predictelection.clients._base_config import ConfigBase
 
 
+DEFAULT_POOL_SIZE = 20
+"""Above the worker's activity thread count.
+
+The activities are sync, so each concurrent one holds a connection for its whole
+duration. SQLAlchemy's default pool is 5 + 10 overflow = 15, under
+`worker.DEFAULT_ACTIVITY_THREADS` of 16 — so at full load the sixteenth activity
+blocked on pool checkout rather than on the database. Sized here rather than
+inherited so the two numbers are visibly related.
+"""
+
+DEFAULT_MAX_OVERFLOW = 10
+
+
 class PostgresConfig(ConfigBase):
     model_config = SettingsConfigDict(env_prefix="postgres_")
     url: str
+    echo: bool = False
+    """Log every statement. Debugging only — it was on by default, which made
+    the worker log the full text of every insert it ever ran."""
+
+    pool_size: int = DEFAULT_POOL_SIZE
+    max_overflow: int = DEFAULT_MAX_OVERFLOW
 
     @model_validator(mode="after")
     def _ensure_postgres_url(self):
@@ -36,7 +55,13 @@ class SqlAlchemyEngineClient:
             connect_args={
                 "options": "-c timezone=utc"  # ensure we are always using utc
             },
-            echo=True,
+            echo=self._config.echo,
+            pool_size=self._config.pool_size,
+            max_overflow=self._config.max_overflow,
+            # A worker idles between runs, and Postgres or anything between it
+            # and here may drop the connection meanwhile. Without this the next
+            # activity fails on a stale socket and burns a retry to find out.
+            pool_pre_ping=True,
         )
         self.session_factory: sessionmaker[Session] = sessionmaker(
             bind=self.engine,
