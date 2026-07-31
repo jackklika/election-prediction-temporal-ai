@@ -1,1 +1,2 @@
-AI may generate code in this repo.
+- All temporal activities and workflows should take and return pydantic objects, not raw types
+- Type hint where possible, even if it seems like overkill

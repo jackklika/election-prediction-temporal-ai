@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from decimal import Decimal
 from typing import Any, Mapping, TypeVar
 import uuid
@@ -43,6 +44,34 @@ from predictelection.sql.predicate import PredicateSpec, PredicateValue
 
 
 _Model = TypeVar("_Model", bound=Base)
+
+
+class ClaimOutcome(StrEnum):
+    """What recording a fact actually changed.
+
+    The distinction matters for reporting: a run that "stored 5 debates" it had
+    already stored last week has done nothing, and a caller cannot tell the
+    difference from an assertion alone.
+    """
+
+    CREATED = "created"
+    """A proposition nothing had asserted before."""
+
+    CORROBORATED = "corroborated"
+    """A known proposition, now supported by further evidence."""
+
+    UNCHANGED = "unchanged"
+    """Already asserted from this evidence by this run — a retry wrote nothing."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedClaim:
+    assertion: ClaimAssertion
+    outcome: ClaimOutcome
+
+    @property
+    def created(self) -> bool:
+        return self.outcome is ClaimOutcome.CREATED
 
 
 def get_or_create(
@@ -184,7 +213,7 @@ def record_claim_from_source(
     origin: RecordOrigin = RecordOrigin.MODEL,
     asserted_by: str | None = None,
     confidence: Decimal | None = None,
-) -> ClaimAssertion:
+) -> RecordedClaim:
     """Record one extracted fact, with the evidence that supports it.
 
     This is the call a scraper makes, and the whole call is idempotent. Running
@@ -197,10 +226,13 @@ def record_claim_from_source(
     activity must be able to complete, and a unique violation would fail it
     forever.
 
+    Returns the outcome as well as the assertion, because "stored 5 debates" is
+    a misleading thing to report when all five were already known.
+
     Ontology alignment is checked and queued for review by new_claim_assertion.
     """
 
-    claim, _ = get_or_create_claim(
+    claim, claim_created = get_or_create_claim(
         session,
         predicate=predicate,
         subject_id=subject_id,
@@ -225,7 +257,7 @@ def record_claim_from_source(
     matches_key = ClaimAssertion.idempotency_key == key
     existing = session.scalars(select(ClaimAssertion).where(matches_key)).first()
     if existing is not None:
-        return existing
+        return RecordedClaim(existing, ClaimOutcome.UNCHANGED)
 
     # The savepoint covers the ReviewTask new_claim_assertion may also add, so a
     # lost race rolls back both rather than orphaning a task.
@@ -244,5 +276,9 @@ def record_claim_from_source(
             )
             session.flush()
     except IntegrityError:
-        return session.scalars(select(ClaimAssertion).where(matches_key)).one()
-    return assertion
+        lost_race = session.scalars(select(ClaimAssertion).where(matches_key)).one()
+        return RecordedClaim(lost_race, ClaimOutcome.UNCHANGED)
+    return RecordedClaim(
+        assertion,
+        ClaimOutcome.CREATED if claim_created else ClaimOutcome.CORROBORATED,
+    )

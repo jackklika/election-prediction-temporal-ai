@@ -110,6 +110,8 @@ from predictelection.sql.resolution import (
     resolve_entity_mention,
 )
 from predictelection.sql.ingest import (
+    ClaimOutcome,
+    RecordedClaim,
     Validity,
     get_or_create,
     get_or_create_claim,
@@ -137,6 +139,7 @@ __all__ = [
     "CanonicalDecimal",
     "Claim",
     "ClaimAssertion",
+    "ClaimOutcome",
     "ClaimSupersession",
     "DEFAULT_REVIEW_PRIORITY",
     "Entity",
@@ -181,6 +184,7 @@ __all__ = [
     "PredicateVersion",
     "PublicStatementValue",
     "RecordOrigin",
+    "RecordedClaim",
     "ResearchRun",
     "ResearchRunInput",
     "ResearchRunStatus",

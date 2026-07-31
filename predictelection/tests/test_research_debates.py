@@ -46,8 +46,11 @@ DEBATE_PAGE = b"""<html><body>
 </body></html>"""
 
 
+ARTICLE_URL = "https://example.test/michigan-debate-2026"
+
 _DEBATE_DEFAULTS: dict[str, Any] = {
     "title": "2026 Michigan Gubernatorial Debate",
+    "source_url": ARTICLE_URL,
     "starts_at": datetime(2026, 9, 15, 21, 0, tzinfo=UTC),
     "starts_at_precision": TimePrecision.MINUTE,
     "ends_at": datetime(2026, 9, 15, 22, 30, tzinfo=UTC),
@@ -80,7 +83,7 @@ def archive(session: Session, object_store) -> SourceArchive:
 def snapshot(archive: SourceArchive):
     return archive.observe(
         kind=SourceKind.WEB_PAGE,
-        canonical_url="https://example.test/michigan-debate-2026",
+        canonical_url=ARTICLE_URL,
         content=DEBATE_PAGE,
         media_type="text/html",
         retrieved_at=datetime(2026, 9, 16, 8, 0, tzinfo=UTC),

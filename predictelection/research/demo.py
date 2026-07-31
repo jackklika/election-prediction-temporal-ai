@@ -43,8 +43,11 @@ ARTICLE = b"""<html><body>
 <p>The candidates met in Detroit on 15 September 2026 for 90 minutes.</p>
 </body></html>"""
 
+ARTICLE_URL = "https://example.test/mi-governor-debate-2026"
+
 DEBATE = ScrapedDebate(
     title="2026 Michigan Gubernatorial Debate",
+    source_url=ARTICLE_URL,
     starts_at=datetime(2026, 9, 15, 21, 0, tzinfo=UTC),
     starts_at_precision=TimePrecision.MINUTE,
     ends_at=datetime(2026, 9, 15, 22, 30, tzinfo=UTC),
@@ -113,7 +116,7 @@ def main() -> None:
 
         snapshot = archive.observe(
             kind=SourceKind.WEB_PAGE,
-            canonical_url="https://example.test/mi-governor-debate-2026",
+            canonical_url=ARTICLE_URL,
             content=ARTICLE,
             media_type="text/html",
             title="El-Sayed and Whitmer clash in Michigan governor debate",

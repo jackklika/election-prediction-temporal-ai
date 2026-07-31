@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from predictelection.sql import (
     ClaimAssertion,
@@ -28,9 +28,10 @@ from predictelection.sql import (
     EntityMention,
     EvidenceLocator,
     EventOccurrenceStatus,
-    ExternalIdentifier,
     FullSourceLocator,
     PoliticalEventKind,
+    ClaimOutcome,
+    RecordedClaim,
     RecordOrigin,
     SourceKind,
     SourceSnapshot,
@@ -41,52 +42,72 @@ from predictelection.sql import (
     resolve_entity_mention,
 )
 from predictelection.research.archive import SourceArchive
+from predictelection.research.scraped import ScrapedEntity, ScrapedRecord
 
 
-class ScrapedEntity(BaseModel):
-    """A named thing an agent saw, with an external ID when the source gave one."""
+class ScrapedDebate(ScrapedRecord):
+    """One debate as an agent reported it.
 
-    model_config = ConfigDict(extra="forbid")
+    Doubles as the agent's output contract, so the field descriptions are the
+    prompt: there is no mapping layer between what the model emits and what gets
+    stored, and no second place for the two to drift apart.
+    """
 
-    name: str = Field(min_length=1, max_length=500)
-    wikidata_id: str | None = Field(default=None, pattern=r"^Q[0-9]+$")
-
-    def as_mention(self, kind: EntityKind) -> EntityMention:
-        identifiers = (
-            (ExternalIdentifier(namespace="wikidata", value=self.wikidata_id),)
-            if self.wikidata_id
-            else ()
-        )
-        return EntityMention(kind=kind, name=self.name, identifiers=identifiers)
-
-
-class ScrapedDebate(BaseModel):
-    """One debate as an agent reported it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    title: str = Field(min_length=1, max_length=500)
-    starts_at: datetime
-    starts_at_precision: TimePrecision = TimePrecision.DAY
-    ends_at: datetime | None = None
-    status: EventOccurrenceStatus = EventOccurrenceStatus.OCCURRED
-    participants: tuple[ScrapedEntity, ...] = ()
-    contest: ScrapedEntity | None = None
-    jurisdiction: ScrapedEntity | None = None
-    video_url: str | None = None
-    """Recorded as a source to fetch later, not archived here."""
+    title: str = Field(
+        min_length=1, max_length=500, description="Formal name or title of the debate."
+    )
+    starts_at: datetime = Field(description="When the debate began, with a timezone.")
+    starts_at_precision: TimePrecision = Field(
+        default=TimePrecision.DAY,
+        description=(
+            "How precisely the source gave the time. Use 'day' when only a date "
+            "was stated and 'minute' when a clock time was. Do not claim more "
+            "precision than the source did."
+        ),
+    )
+    ends_at: datetime | None = Field(
+        default=None, description="When it ended, if the source says."
+    )
+    status: EventOccurrenceStatus = Field(
+        default=EventOccurrenceStatus.OCCURRED,
+        description="Whether it happened, is upcoming, was postponed, or cancelled.",
+    )
+    participants: tuple[ScrapedEntity, ...] = Field(
+        default=(), description="The people who debated."
+    )
+    contest: ScrapedEntity | None = Field(
+        default=None,
+        description="The race being contested, e.g. 'Michigan Governor 2026'.",
+    )
+    jurisdiction: ScrapedEntity | None = Field(
+        default=None, description="Where it was held, e.g. 'Michigan'."
+    )
+    video_url: str | None = Field(
+        default=None,
+        description="Full recording, ideally the host's official upload.",
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class DebateIngestion:
     event_id: uuid.UUID
-    assertions: tuple[ClaimAssertion, ...]
+    recorded: tuple[RecordedClaim, ...]
+    event_created: bool = False
+    """False means this debate was already in the graph under this title."""
+
     participant_ids: tuple[uuid.UUID, ...] = field(default=())
     video_source_id: uuid.UUID | None = None
 
     @property
+    def assertions(self) -> tuple[ClaimAssertion, ...]:
+        return tuple(item.assertion for item in self.recorded)
+
+    @property
     def misaligned(self) -> tuple[ClaimAssertion, ...]:
         return tuple(a for a in self.assertions if not a.ontology_aligned)
+
+    def count(self, outcome: ClaimOutcome) -> int:
+        return sum(1 for item in self.recorded if item.outcome is outcome)
 
 
 def ingest_debate(
@@ -126,7 +147,7 @@ def ingest_debate(
         session,
         EntityMention(kind=EntityKind.EVENT, name=debate.title),
     )
-    assertions = [
+    recorded = [
         assert_claim(
             "event_kind",
             subject_id=event.entity_id,
@@ -146,7 +167,7 @@ def ingest_debate(
     for person in debate.participants:
         resolved = resolve_entity_mention(session, person.as_mention(EntityKind.PERSON))
         participant_ids.append(resolved.entity_id)
-        assertions.append(
+        recorded.append(
             assert_claim(
                 "participated_in",
                 subject_id=resolved.entity_id,
@@ -158,7 +179,7 @@ def ingest_debate(
         contest = resolve_entity_mention(
             session, debate.contest.as_mention(EntityKind.CONTEST)
         )
-        assertions.append(
+        recorded.append(
             assert_claim(
                 "event_about_contest",
                 subject_id=event.entity_id,
@@ -170,7 +191,7 @@ def ingest_debate(
         jurisdiction = resolve_entity_mention(
             session, debate.jurisdiction.as_mention(EntityKind.JURISDICTION)
         )
-        assertions.append(
+        recorded.append(
             assert_claim(
                 "event_in_jurisdiction",
                 subject_id=event.entity_id,
@@ -190,7 +211,8 @@ def ingest_debate(
 
     return DebateIngestion(
         event_id=event.entity_id,
-        assertions=tuple(assertions),
+        recorded=tuple(recorded),
+        event_created=event.created,
         participant_ids=tuple(participant_ids),
         video_source_id=video_source_id,
     )

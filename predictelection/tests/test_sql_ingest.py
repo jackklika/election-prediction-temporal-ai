@@ -219,7 +219,7 @@ def test_rescraping_corroborates_rather_than_duplicates(session: Session) -> Non
             research_run_id=run.id,
         )
 
-    one, two = record(first_run), record(second_run)
+    one, two = record(first_run).assertion, record(second_run).assertion
 
     assert one.claim_id == two.claim_id
     assert one.id != two.id
@@ -246,7 +246,7 @@ def test_a_retried_activity_completes_instead_of_colliding(session: Session) -> 
             research_run_id=run.id,
         )
 
-    first, retry = attempt(), attempt()
+    first, retry = attempt().assertion, attempt().assertion
 
     assert first.id == retry.id
     assert session.scalar(select(func.count(ClaimAssertion.id))) == 1
@@ -259,7 +259,7 @@ def test_ingestion_flags_a_misaligned_claim_without_dropping_it(
     subject = f.make_entity(session, kind=EntityKind.JURISDICTION)
     obj = f.make_entity(session, kind=EntityKind.PERSON)
 
-    assertion = record_claim_from_source(
+    recorded = record_claim_from_source(
         session,
         predicate=spec,
         subject_id=subject.id,
@@ -268,7 +268,7 @@ def test_ingestion_flags_a_misaligned_claim_without_dropping_it(
         locator=FullSourceLocator(),
     )
 
-    assert assertion.ontology_aligned is False
+    assert recorded.assertion.ontology_aligned is False
     assert session.scalar(select(func.count(Claim.id))) == 1
     assert session.scalar(select(func.count(ReviewTask.id))) == 1
 
@@ -333,7 +333,7 @@ def test_structural_predicates_are_seeded_and_usable(session: Session) -> None:
         ("office_for_jurisdiction", governor, michigan),
     ]
     for slug, subject, obj in links:
-        assertion = record_claim_from_source(
+        recorded = record_claim_from_source(
             session,
             predicate=get_predicate_spec(slug),
             subject_id=subject.entity_id,
@@ -341,7 +341,7 @@ def test_structural_predicates_are_seeded_and_usable(session: Session) -> None:
             source_snapshot_id=snapshot.id,
             locator=FullSourceLocator(),
         )
-        assert assertion.ontology_aligned is True, slug
+        assert recorded.assertion.ontology_aligned is True, slug
 
     # the correlation query the README wants: races decided by one geography
     contests_in_michigan = session.scalars(
@@ -360,7 +360,7 @@ def test_every_seeded_predicate_round_trips(session: Session) -> None:
     snapshot = f.make_snapshot(session)
     for spec in PREDICATE_SPECS:
         subject_id, object_id = f.make_claim_subject_and_object(session, spec)
-        assertion = record_claim_from_source(
+        recorded = record_claim_from_source(
             session,
             predicate=spec,
             subject_id=subject_id,
@@ -373,4 +373,4 @@ def test_every_seeded_predicate_round_trips(session: Session) -> None:
             stance=EvidenceStance.SUPPORTS,
             origin=RecordOrigin.MODEL,
         )
-        assert assertion.ontology_aligned is True, spec.slug
+        assert recorded.assertion.ontology_aligned is True, spec.slug
