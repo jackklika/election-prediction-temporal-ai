@@ -1,131 +1,209 @@
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from enum import Enum as PythonEnum
+from enum import StrEnum
+from hashlib import sha256
+import json
 from typing import Annotated, Any
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, UniqueConstraint, func, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from pydantic import AfterValidator
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum as SqlEnum,
+    Identity,
+    MetaData,
+    event,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import DeclarativeBase, mapped_column, object_session
 
 
-timestamp_utc = Annotated[
-    datetime, mapped_column(DateTime(timezone=True), server_default=func.now())
+_NAMING_CONVENTION: dict[str, str] = {
+    "ix": "ix_%(table_name)s_%(column_0_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+uuid_primary_key = Annotated[
+    uuid.UUID,
+    mapped_column(primary_key=True, default=uuid.uuid4),
 ]
+utc_timestamp = Annotated[datetime, mapped_column(DateTime(timezone=True))]
+created_at_timestamp = Annotated[
+    datetime,
+    mapped_column(DateTime(timezone=True), server_default=func.now()),
+]
+insert_sequence = Annotated[
+    int,
+    mapped_column(BigInteger, Identity(always=True)),
+]
+"""A monotonic insert counter for rows whose current state is "the latest one".
+
+created_at uses now(), which PostgreSQL evaluates once per transaction, so rows
+written by a single research run share a timestamp and cannot be ordered. This
+column breaks those ties. Note it records assignment order, not commit order:
+under concurrency a lower sequence may become visible after a higher one, so
+this is a strong ordering rather than a serialization point.
+"""
+
+
+class TimePrecision(StrEnum):
+    YEAR = "year"
+    MONTH = "month"
+    DAY = "day"
+    HOUR = "hour"
+    MINUTE = "minute"
+    SECOND = "second"
+    EXACT = "exact"
+
+
+class RecordOrigin(StrEnum):
+    MODEL = "model"
+    HUMAN = "human"
+    IMPORT = "import"
+    SYSTEM = "system"
+
+
+ENUM_VALUE_LENGTH = 32
+"""Fixed VARCHAR width for every checked enum column.
+
+Without this, SQLAlchemy sizes the column to the longest current member, so
+adding a longer member later would need ALTER COLUMN TYPE on top of rebuilding
+the CHECK constraint. A fixed width keeps enum growth to a CHECK swap.
+"""
+
+
+def nullable_jsonb() -> JSONB:
+    """JSONB where a Python None means SQL NULL, not the JSON value null.
+
+    SQLAlchemy's default is the opposite: None is persisted as 'null'::jsonb,
+    which is not SQL NULL, so every constraint phrased as "value IS NULL" is
+    silently false and rejects the row it was meant to allow. Every nullable
+    JSONB column in this package must use this.
+    """
+
+    return JSONB(none_as_null=True)
+
+
+def enum_type(enum_class: type[PythonEnum], *, name: str) -> SqlEnum:
+    """Build a checked VARCHAR enum that persists each member's value."""
+
+    longest_value = max(len(str(member.value)) for member in enum_class)
+    if longest_value > ENUM_VALUE_LENGTH:
+        raise ValueError(
+            f"{enum_class.__name__} has a member longer than {ENUM_VALUE_LENGTH}"
+        )
+
+    return SqlEnum(
+        enum_class,
+        name=name,
+        native_enum=False,
+        create_constraint=True,
+        validate_strings=True,
+        length=ENUM_VALUE_LENGTH,
+        values_callable=lambda members: [str(member.value) for member in members],
+    )
+
+
+def canonical_decimal(value: Decimal) -> str:
+    """Render a Decimal so equal numbers always produce equal text.
+
+    str() keeps the original scale, so Decimal("12.5") and Decimal("12.50")
+    would hash differently and defeat the fingerprint unique constraints.
+    normalize() strips trailing zeros, and the "f" format avoids the
+    scientific notation normalize() otherwise introduces for integers.
+    """
+
+    if not value.is_finite():
+        raise ValueError("canonical decimals must be finite")
+    return format(value.normalize(), "f")
+
+
+def _canonicalize_decimal(value: Decimal) -> Decimal:
+    return Decimal(canonical_decimal(value))
+
+
+CanonicalDecimal = Annotated[Decimal, AfterValidator(_canonicalize_decimal)]
+"""A Decimal that discards scale on validation.
+
+Pydantic serializes Decimal to a scale-preserving string in JSON mode, so a
+plain Decimal field reaches canonical_json already stringified as "12.50" and
+_canonical_json_default never sees it. Value models and evidence locators whose
+numbers participate in a fingerprint must use this type instead.
+"""
+
+
+def _canonical_json_default(value: object) -> str:
+    if isinstance(value, datetime):
+        if value.utcoffset() is None:
+            raise ValueError("canonical datetimes must be timezone-aware")
+        return value.astimezone(UTC).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return canonical_decimal(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, PythonEnum):
+        return str(value.value)
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize a value deterministically for identities and audit hashes."""
+
+    return json.dumps(
+        value,
+        default=_canonical_json_default,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def canonical_json_sha256(value: Any) -> str:
+    return sha256(canonical_json(value).encode()).hexdigest()
 
 
 class Base(DeclarativeBase):
-    """Base ORM model"""
+    """Base for all ORM models."""
+
+    metadata = MetaData(naming_convention=_NAMING_CONVENTION)
 
 
-class Entity(Base):
-    """A thing a fact can be about, 'Proper Noun'"""
+class Immutable:
+    """Marker for append-only rows.
 
-    __tablename__: str = "entity"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    kind: Mapped[str]
-    canonical_name: Mapped[str]  # The official name of this entity we agree on
-    # aliases: Mapped[list[str]] = mapped_column(ARRAY(String), default=list) # probably do via differnt table for efficiency
-    wikidata_id: Mapped[
-        str | None
-    ]  # wikidata is used for our best "unique identifier" for entities
-
-    # IDs from other sources that refer to this entity. This is more important than canonical_name since
-    # there can be duplicates. We have wikidata as top-level column since it is present for most major
-    # entities already, and is a good default.
-    #
-    # For example for Francesca Hong:
-    # {"wikidata":"Q102181078", "wikipedia_curid":"65899862"}
-    external_ids: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-
-    created_at: Mapped[timestamp_utc]
-
-    __table_args__ = (
-        Index(
-            "uq_entity_wikidata",
-            "wikidata_id",
-            unique=True,
-            postgresql_where=text("wikidata_id IS NOT NULL"),
-        ),
-    )
+    The ORM guards below prevent ordinary Session updates and deletes. Database
+    roles should also deny UPDATE and DELETE in deployments where tamper
+    resistance is required; SQLAlchemy events cannot protect direct SQL.
+    """
 
 
-class Source(Base):
-    """Where a fact came from"""
+@event.listens_for(Base, "before_update", propagate=True)
+def _prevent_immutable_update(
+    mapper: object, connection: object, target: object
+) -> None:
+    del mapper, connection
+    if not isinstance(target, Immutable):
+        return
 
-    __tablename__: str = "source"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    kind: Mapped[str]
-    url: Mapped[str | None]
-    publisher: Mapped[str | None]
-
-    created_at: Mapped[timestamp_utc]
-
-
-class Fact(Base):
-    __tablename__: str = "fact"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    predicate: Mapped[str]
-
-    # What the fact is about
-    subject_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("entity.id"))
-
-    # the other entity the fact points at when the predicate is a relationship between two entities, like "endorsed_by"
-    object_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("entity.id"))
-    source_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("source.id"))
-
-    value: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[timestamp_utc]
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # when the fact is true at
-
-    __mapper_args__: dict[str, str | bool] = {
-        # Specifies the column, attribute, or SQL expression used to determine the target class
-        # for an incoming row, when inheriting classes are present.
-        # This is used so we can have orm models per fact type
-        # https://docs.sqlalchemy.org/en/20/orm/mapping_api.html#sqlalchemy.orm.Mapper.params.polymorphic_on
-        "polymorphic_on": "predicate",
-        "polymorphic_abstract": True,
-    }
-
-    __table_args__: tuple = (
-        # Helps us ensure true idempotent
-        UniqueConstraint(
-            "subject_id",
-            "predicate",
-            "source_id",
-            "observed_at",
-            name="uq_fact_idem",
-            postgresql_nulls_not_distinct=True,  # ensure we don't factor null into distinct
-        ),
-    )
-
-class Poll(Fact):
-    __mapper_args__ = {"polymorphic_identity": "poll_average"}
-
-    @hybrid_property
-    def pct(self) -> Decimal:
-        return self.value["pct"]
-
-    @pct.inplace.expression
-    @classmethod
-    def _pct(cls):
-        """
-        SQL-side expression so we can reference this in sql queries
-
-        If we do `value -> 'pct'` this gets a JSON value, not a number.
-        So this fixes the extraction, treating it as a number.
-        """
-        return cls.value["pct"].astext.cast(Numeric)
+    session = object_session(target)
+    if session is None or session.is_modified(target, include_collections=False):
+        raise TypeError(f"{type(target).__name__} rows are immutable")
 
 
-
-if __name__ == "__main__":
-    from predictelection.clients.sqlalchemy_engine import SqlAlchemyEngineClient
-
-    client = SqlAlchemyEngineClient()
-    Base.metadata.create_all(
-        client.engine
-    )  # convert this to migrations via Alembic later
+@event.listens_for(Base, "before_delete", propagate=True)
+def _prevent_immutable_delete(
+    mapper: object, connection: object, target: object
+) -> None:
+    del mapper, connection
+    if isinstance(target, Immutable):
+        raise TypeError(f"{type(target).__name__} rows are immutable")

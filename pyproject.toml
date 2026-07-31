@@ -7,15 +7,26 @@ requires-python = ">=3.14"
 dependencies = [
     "kalshi-python-async>=3.23.0",
     "psycopg[binary]>=3.3.4",
-    "pydantic-ai>=2.7.0",
+    "pydantic-ai[temporal]>=2.19.0",
+    "pydantic-ai-harness[code-mode,codemode,temporal]>=0.14.0",
     "pydantic-settings>=2.14.2",
     "pytest>=9.1.1",
     "sqlalchemy>=2.0.51",
     "temporalio>=1.30.0",
+    "pydantic-monty>=0.0.19",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.15.20",
     "ty>=0.0.57",
+]
+
+[tool.pytest.ini_options]
+# Without pythonpath the predictelection package is only importable via
+# `python -m pytest`, which puts the cwd on sys.path; plain `pytest` fails.
+pythonpath = ["."]
+testpaths = ["predictelection/tests"]
+markers = [
+    "postgres: needs a live PostgreSQL (skipped unless --require-postgres or a reachable POSTGRES_URL)",
 ]

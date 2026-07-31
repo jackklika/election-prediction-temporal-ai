@@ -30,7 +30,7 @@ class SqlAlchemyEngineClient:
             echo=True,
         )
         self.session_factory: sessionmaker[Session] = sessionmaker(
-            engine=self.engine,
+            bind=self.engine,
             expire_on_commit=False,  # We can return "dead" orm objects without triggering refreshes
         )
 
