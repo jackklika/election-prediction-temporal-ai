@@ -172,6 +172,32 @@ def canonical_json_sha256(value: Any) -> str:
     return sha256(canonical_json(value).encode()).hexdigest()
 
 
+def idempotency_key(operation: str, /, **parts: Any) -> str:
+    """Build a key that is stable across retries of the same logical write.
+
+    Every idempotency_key column is unique, which only helps if the key is a
+    function of *what is being written* rather than of when. A retried Temporal
+    activity must reproduce the key exactly so the second attempt is rejected;
+    a uuid4 or a timestamp would defeat the column entirely.
+
+    Deliberately not derived from Temporal identifiers: ResearchRun is documented
+    as working whether or not Temporal ran it, and uq_research_run_temporal_execution
+    already covers the workflow-execution angle. Hashing content works for both.
+
+    The exception is ReviewDecision. Human review is interactive rather than
+    retried, and a reviewer must be able to change their mind later, since the
+    latest decision wins. Pass a per-action token from the UI there instead of
+    hashing the outcome.
+
+    The readable prefix is for debugging: a unique violation then names the
+    operation that collided instead of showing an opaque digest.
+    """
+
+    if not operation or operation != operation.strip():
+        raise ValueError("idempotency operations need a non-blank name")
+    return f"{operation}:{canonical_json_sha256(parts)}"
+
+
 class Base(DeclarativeBase):
     """Base for all ORM models."""
 

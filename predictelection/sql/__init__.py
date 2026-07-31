@@ -7,6 +7,7 @@ from predictelection.sql.base import (
     canonical_decimal,
     canonical_json,
     canonical_json_sha256,
+    idempotency_key,
 )
 from predictelection.sql.entity import (
     Entity,
@@ -32,6 +33,8 @@ from predictelection.sql.provenance import (
 )
 from predictelection.sql.predicate import (
     EventKindValue,
+    EventOccurrenceStatus,
+    EventOccurrenceValue,
     PREDICATE_SPECS,
     PoliticalEventKind,
     Predicate,
@@ -99,6 +102,20 @@ from predictelection.sql.review import (
     ReviewTask,
     ReviewTaskStatus,
 )
+from predictelection.sql.resolution import (
+    EntityMention,
+    ExternalIdentifier,
+    Resolution,
+    ResolutionMethod,
+    resolve_entity_mention,
+)
+from predictelection.sql.ingest import (
+    Validity,
+    get_or_create,
+    get_or_create_claim,
+    get_or_create_evidence_anchor,
+    record_claim_from_source,
+)
 from predictelection.sql.integrity import (
     assert_graph_integrity,
     check_graph_integrity,
@@ -126,13 +143,17 @@ __all__ = [
     "EntityAlias",
     "EntityIdentifier",
     "EntityKind",
+    "EntityMention",
     "EntityRedirect",
     "EventKindValue",
+    "EventOccurrenceStatus",
+    "EventOccurrenceValue",
     "EvidenceAnchor",
     "EvidenceLocator",
     "EvidenceLocatorKind",
     "EvidenceLocatorModel",
     "EvidenceStance",
+    "ExternalIdentifier",
     "FullSourceLocator",
     "Immutable",
     "JsonEvidenceLocator",
@@ -163,6 +184,8 @@ __all__ = [
     "ResearchRun",
     "ResearchRunInput",
     "ResearchRunStatus",
+    "Resolution",
+    "ResolutionMethod",
     "ReviewDecision",
     "ReviewOutcome",
     "ReviewTask",
@@ -173,6 +196,7 @@ __all__ = [
     "SourceSnapshot",
     "TemporalMode",
     "TimePrecision",
+    "Validity",
     "VideoEvidenceLocator",
     "WebEvidenceLocator",
     "assert_graph_integrity",
@@ -192,8 +216,12 @@ __all__ = [
     "find_entity_redirect_cycle",
     "find_poll_average_revision_supersession_cycle",
     "find_poll_revision_supersession_cycle",
+    "get_or_create",
+    "get_or_create_claim",
+    "get_or_create_evidence_anchor",
     "get_predicate_spec",
     "get_predicate_spec_by_id",
+    "idempotency_key",
     "new_claim",
     "new_claim_assertion",
     "new_entity_alias",
@@ -207,6 +235,8 @@ __all__ = [
     "normalize_identifier_namespace",
     "ontology_alignment_score",
     "rebuild_schema",
+    "record_claim_from_source",
     "resolve_entity",
+    "resolve_entity_mention",
     "seed_predicates",
 ]

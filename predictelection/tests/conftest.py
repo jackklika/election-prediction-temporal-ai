@@ -61,8 +61,35 @@ def pytest_addoption(parser: Parser) -> None:
         "--require-postgres",
         action="store_true",
         default=False,
-        help="Fail instead of skipping when PostgreSQL is unreachable.",
+        help="Fail instead of skipping when PostgreSQL or MinIO is unreachable.",
     )
+
+
+@pytest.fixture(scope="session")
+def object_store(pytestconfig: Config):
+    """A bucket on the local MinIO, which speaks the same API as S3.
+
+    Testing against MinIO rather than a mock means the integration tests exercise
+    the same S3ObjectStore that will talk to AWS, so a credential or addressing
+    mistake surfaces here instead of in production.
+    """
+
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from predictelection.storage import S3ObjectStore, local_minio_config
+
+    store = S3ObjectStore(local_minio_config(bucket="predictelection-test"))
+    try:
+        store.ensure_bucket()
+    except (ClientError, BotoCoreError, OSError) as error:
+        message = (
+            f"MinIO is not reachable: {error.__class__.__name__}. "
+            "Start it with `docker compose up -d`."
+        )
+        if pytestconfig.getoption("--require-postgres"):
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message, allow_module_level=True)
+    return store
 
 
 def _postgres_url() -> str:

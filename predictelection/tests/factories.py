@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from predictelection.sql import (
     Artifact,
     Entity,
+    EntityAlias,
     EntityKind,
     EvidenceAnchor,
     FullSourceLocator,
@@ -28,6 +29,10 @@ from predictelection.sql import (
     Source,
     SourceKind,
     SourceSnapshot,
+    TemporalMode,
+    TimePrecision,
+    Validity,
+    new_entity_alias,
     new_evidence_anchor,
     new_poll_revision,
 )
@@ -196,3 +201,50 @@ def make_claim_subject_and_object(
         return subject.id, None
     obj = make_entity(session, kind=predicate.object_kinds[0])
     return subject.id, obj.id
+
+
+def new_alias(entity_id: uuid.UUID, name: str) -> EntityAlias:
+    return new_entity_alias(entity_id=entity_id, name=name)
+
+
+def sample_value_for(predicate: PredicateSpec) -> dict[str, object] | None:
+    """A minimal valid payload for a value predicate, built from its schema.
+
+    Driven by the JSON schema rather than a hardcoded table so that a newly
+    seeded predicate is exercised without anyone remembering to update this.
+    """
+
+    if predicate.value_model is None:
+        return None
+    schema = predicate.value_model.model_json_schema()
+    definitions = schema.get("$defs", {})
+    value: dict[str, object] = {}
+    for name, field in schema.get("properties", {}).items():
+        if name not in schema.get("required", []):
+            continue
+        value[name] = _sample_field(field, definitions)
+    return value
+
+
+def _sample_field(field: dict, definitions: dict) -> object:
+    if "$ref" in field:
+        field = definitions[field["$ref"].rsplit("/", 1)[-1]]
+    if "enum" in field:
+        return field["enum"][0]
+    if field.get("type") == "integer":
+        return 1
+    if field.get("type") == "number":
+        return 1.0
+    return "sample"
+
+
+def sample_validity_for(predicate: PredicateSpec) -> Validity | None:
+    """Satisfy the predicate's temporal mode without the caller knowing it."""
+
+    if predicate.temporal_mode is TemporalMode.REQUIRED:
+        return Validity.between(
+            datetime(2026, 9, 15, 21, 0, tzinfo=UTC),
+            datetime(2026, 9, 15, 22, 30, tzinfo=UTC),
+            TimePrecision.MINUTE,
+        )
+    return None

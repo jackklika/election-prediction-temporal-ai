@@ -14,6 +14,7 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "temporalio>=1.30.0",
     "pydantic-monty>=0.0.19",
+    "boto3>=1.43.60",
 ]
 
 [dependency-groups]

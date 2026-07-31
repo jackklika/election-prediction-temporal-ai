@@ -16,6 +16,15 @@ class PostgresConfig(ConfigBase):
             raise ValueError(
                 "Connection string must start with postgresql -- only postgres supported"
             )
+        if self.url.startswith("postgresql://"):
+            # SQLAlchemy reads a bare postgresql:// as psycopg2, which this
+            # project does not install; the dependency is psycopg 3. Normalizing
+            # here keeps a plain connection string working everywhere.
+            object.__setattr__(
+                self,
+                "url",
+                self.url.replace("postgresql://", "postgresql+psycopg://", 1),
+            )
         return self
 
 

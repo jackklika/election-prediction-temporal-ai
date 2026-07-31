@@ -54,6 +54,13 @@ class PoliticalEventKind(StrEnum):
     OTHER = "other"
 
 
+class EventOccurrenceStatus(StrEnum):
+    SCHEDULED = "scheduled"
+    OCCURRED = "occurred"
+    POSTPONED = "postponed"
+    CANCELLED = "cancelled"
+
+
 class PredicateValue(BaseModel):
     """Base for the JSON value of one literal predicate."""
 
@@ -62,6 +69,19 @@ class PredicateValue(BaseModel):
 
 class EventKindValue(PredicateValue):
     kind: PoliticalEventKind
+
+
+class EventOccurrenceValue(PredicateValue):
+    """Whether an event happened; *when* lives in the claim's validity interval.
+
+    Every predicate is either (subject, object) or (subject, value), so there is
+    no way to state a bare timestamped fact about a subject. Carrying the status
+    here gives the claim a real payload while valid_from/valid_to carry the
+    schedule with their own precision — which also means a postponement is a new
+    claim over a new interval rather than an edit.
+    """
+
+    status: EventOccurrenceStatus
 
 
 class PublicStatementValue(PredicateValue):
@@ -341,6 +361,92 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         temporal_mode=TemporalMode.REQUIRED,
         subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION),
         value_model=PublicStatementValue,
+    ),
+    # The structural backbone. Contests, offices, elections, and jurisdictions
+    # are all just entities, so the relationships between them exist only as
+    # claims — without these predicates there is no way to ask which races share
+    # a geography, which is what crosstab and correlation queries are built on.
+    PredicateSpec(
+        slug="contest_of_election",
+        version=1,
+        label="Contest of election",
+        description="The contest is one of the races decided in the given election.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        object_kinds=(EntityKind.ELECTION,),
+    ),
+    PredicateSpec(
+        slug="contest_for_office",
+        version=1,
+        label="Contest for office",
+        description="The contest determines who holds the given office.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        object_kinds=(EntityKind.OFFICE,),
+    ),
+    PredicateSpec(
+        slug="office_for_jurisdiction",
+        version=1,
+        label="Office for jurisdiction",
+        description="The office represents or governs the given jurisdiction.",
+        # Optional rather than timeless: districts are redrawn, so the pairing
+        # can be true only for a period.
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.OPTIONAL,
+        subject_kinds=(EntityKind.OFFICE,),
+        object_kinds=(EntityKind.JURISDICTION,),
+    ),
+    PredicateSpec(
+        slug="contest_in_jurisdiction",
+        version=1,
+        label="Contest in jurisdiction",
+        description="The contest is decided by voters of the given jurisdiction.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.CONTEST,),
+        object_kinds=(EntityKind.JURISDICTION,),
+    ),
+    PredicateSpec(
+        slug="market_for_contest",
+        version=1,
+        label="Market for contest",
+        description="The prediction market settles on the outcome of the contest.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.MARKET,),
+        object_kinds=(EntityKind.CONTEST,),
+    ),
+    PredicateSpec(
+        slug="event_about_contest",
+        version=1,
+        label="Event about contest",
+        description="The event concerns the given contest, such as its debate.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.EVENT,),
+        object_kinds=(EntityKind.CONTEST,),
+    ),
+    PredicateSpec(
+        slug="event_in_jurisdiction",
+        version=1,
+        label="Event in jurisdiction",
+        description="The event took place in the given jurisdiction.",
+        target_kind=PredicateTarget.ENTITY,
+        temporal_mode=TemporalMode.TIMELESS,
+        subject_kinds=(EntityKind.EVENT,),
+        object_kinds=(EntityKind.JURISDICTION,),
+    ),
+    PredicateSpec(
+        slug="event_occurrence",
+        version=1,
+        label="Event occurrence",
+        description="Whether an event is scheduled or happened, over its interval.",
+        target_kind=PredicateTarget.VALUE,
+        temporal_mode=TemporalMode.REQUIRED,
+        subject_kinds=(EntityKind.EVENT,),
+        value_model=EventOccurrenceValue,
     ),
 )
 
