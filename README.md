@@ -1,5 +1,7 @@
 # ElectAlpha
 
+[![CI](https://github.com/jackklika/election-prediction-temporal-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/jackklika/election-prediction-temporal-ai/actions/workflows/ci.yml)
+
 This project is a tool to use to collect citable infromation about elections, with the goal to run analysis on these facts. It interacts with data sources to collect facts about a race and candidate, and uses an agent to research and populate a knowledge graph.
 
 For example, we can break elections down into Candidates that run in Races which have Outcomes, participate with other Candidates in Events like Debates where the candidates produce Speech, have Polls run against them. These Races take places in Geographies that can be represented by polygons, and Populations vote for Candidates which results in Outcomes.
