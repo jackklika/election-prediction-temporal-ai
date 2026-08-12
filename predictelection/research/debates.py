@@ -24,13 +24,17 @@ from pydantic import Field
 
 from predictelection.sql import (
     EntityKind,
+    EntityMention,
     EventOccurrenceStatus,
+    ExternalIdentifier,
     ParticipationRole,
     PoliticalEventKind,
+    Resolution,
     SourceKind,
     TimePrecision,
     Validity,
 )
+from predictelection.research.contests import EVENT_KEY_NAMESPACE, EventKey
 from predictelection.research.ingestion import Ingestion, IngestContext
 from predictelection.research.scraped import ScrapedEntity, ScrapedRecord
 
@@ -81,6 +85,16 @@ class ScrapedDebate(ScrapedRecord):
     jurisdiction: ScrapedEntity | None = Field(
         default=None, description="Where it was held, e.g. 'Michigan'."
     )
+    host: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Who staged or broadcast it — 'WOOD TV8', 'Fox 2 Detroit', "
+            "'Mackinac Policy Conference'. Usually the part in parentheses in "
+            "a debate's name. Give it when the source names one: it is what "
+            "separates two debates held in the same place on the same day."
+        ),
+    )
     video_url: str | None = Field(
         default=None,
         description="Full recording, ideally the host's official upload.",
@@ -98,7 +112,18 @@ def ingest_debate(debate: ScrapedDebate, context: IngestContext) -> Ingestion:
     dispatch to any of them without knowing which domain it is holding.
     """
 
-    event = context.resolve(EntityKind.EVENT, debate.title)
+    # Jurisdiction first, because the event's identity is derived from it. A
+    # debate resolved by title alone forks every time the agent re-words it —
+    # the failure that produced 11 event entities for 6 real debates.
+    jurisdiction = (
+        context.resolve(EntityKind.JURISDICTION, debate.jurisdiction)
+        if debate.jurisdiction is not None
+        else None
+    )
+    event = context.resolve(
+        EntityKind.EVENT, _event_mention(debate, context, jurisdiction)
+    )
+
     recorded = [
         context.record(
             "event_kind",
@@ -147,8 +172,7 @@ def ingest_debate(debate: ScrapedDebate, context: IngestContext) -> Ingestion:
             )
         )
 
-    if debate.jurisdiction is not None:
-        jurisdiction = context.resolve(EntityKind.JURISDICTION, debate.jurisdiction)
+    if jurisdiction is not None and debate.jurisdiction is not None:
         recorded.append(
             context.record(
                 "event_in_jurisdiction",
@@ -174,4 +198,49 @@ def ingest_debate(debate: ScrapedDebate, context: IngestContext) -> Ingestion:
         subject_created=event.created,
         related_entity_ids=tuple(participant_ids),
         registered_source_ids=() if video_source_id is None else (video_source_id,),
+    )
+
+
+def _event_mention(
+    debate: ScrapedDebate,
+    context: IngestContext,
+    jurisdiction: Resolution | None,
+) -> EntityMention | str:
+    """Identify the debate by when and where it happened, not by its title.
+
+    Falls back to the title when the event cannot be keyed — no jurisdiction, a
+    jurisdiction with no OCD division (the OCD import has not run), or a source
+    too vague about the date. That is the old behaviour, kept deliberately: a
+    key derived from a name some of the time and an ID the rest of the time
+    would fork on exactly the axis it exists to fix.
+    """
+
+    if jurisdiction is None:
+        return debate.title
+
+    division = context.identifier_for(jurisdiction.entity_id, "ocd-division")
+    if division is None:
+        return debate.title
+
+    key = EventKey.build(
+        division=division,
+        kind=PoliticalEventKind.DEBATE,
+        moment=debate.starts_at,
+        precision=debate.starts_at_precision,
+        host=debate.host,
+    )
+    if key is None:
+        return debate.title
+
+    # The title still names the entity when it is newly minted, and is recorded
+    # as an alias either way, so a later lookup by name still finds it.
+    return EntityMention(
+        kind=EntityKind.EVENT,
+        name=debate.title,
+        identifiers=(
+            ExternalIdentifier(namespace=EVENT_KEY_NAMESPACE, value=str(key)),
+        ),
+        # The key defines the event; two debates can share a title and not be
+        # the same debate.
+        identifiers_are_authoritative=True,
     )

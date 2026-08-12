@@ -82,6 +82,20 @@ class EntityMention:
     identifiers: tuple[ExternalIdentifier, ...] = ()
     aliases: tuple[str, ...] = field(default=())
 
+    identifiers_are_authoritative: bool = False
+    """Whether an identifier miss should mint rather than fall back to the name.
+
+    Off by default, because for most identifiers the name is still evidence: the
+    OCD import saying "Michigan" with an `ocd-division` ID should attach that ID
+    to the Michigan a debate already created, not mint a second one.
+
+    On for a *derived* key, where the identifier is not a fact about the entity
+    but the definition of it. Two debates titled "Michigan Senate Debate" on
+    different days are different events; with this off they merge on the name
+    and the survivor ends up carrying both keys, which is worse than either
+    outcome on its own.
+    """
+
     def __post_init__(self) -> None:
         normalize_entity_name(self.name)  # reject blank or whitespace-only early
 
@@ -242,7 +256,14 @@ def resolve_entity_mention(session: Session, mention: EntityMention) -> Resoluti
     method = ResolutionMethod.IDENTIFIER
     ambiguous_with: tuple[uuid.UUID, ...] = ()
 
-    if entity is None:
+    # A miss on an authoritative identifier means this is a new thing, not a
+    # thing to look up by name. Falling through would merge two entities the
+    # keys say are distinct, and then record both keys on the survivor.
+    name_may_decide = not (
+        mention.identifiers and mention.identifiers_are_authoritative
+    )
+
+    if entity is None and name_may_decide:
         entity, ambiguous_with = _match_by_alias(
             session, kind=mention.kind, normalized_name=normalized_name
         )

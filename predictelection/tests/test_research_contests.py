@@ -12,13 +12,23 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import UTC, date, datetime
+
 from predictelection.research.contests import (
     CONTEST_KEY_NAMESPACE,
+    EVENT_KEY_NAMESPACE,
     ContestKey,
+    EventKey,
     normalize_slug,
 )
 from predictelection.research.scraped import ScrapedEntity
-from predictelection.sql import ContestStage, EntityKind, NAMESPACE_SPECS
+from predictelection.sql import (
+    ContestStage,
+    EntityKind,
+    NAMESPACE_SPECS,
+    PoliticalEventKind,
+    TimePrecision,
+)
 
 
 MICHIGAN = "ocd-division/country:us/state:mi"
@@ -179,3 +189,115 @@ def test_normalize_slug_refuses_something_with_no_content() -> None:
     assert normalize_slug("  U.S.  Senate ") == "u-s-senate"
     with pytest.raises(ValueError, match="no usable characters"):
         normalize_slug("!!!")
+
+
+# --------------------------------------------------------------------------
+# Events — the identity that was actually measured breaking
+
+
+def test_the_same_debate_worded_differently_gives_one_event_key() -> None:
+    """11 event entities for 6 real debates, and this is the fix.
+
+    The agent re-phrased each title between runs. A date does not get
+    re-phrased.
+    """
+
+    common = {
+        "division": MICHIGAN,
+        "kind": PoliticalEventKind.DEBATE,
+        "moment": datetime(2026, 7, 7, 20, 0, tzinfo=UTC),
+        "precision": TimePrecision.MINUTE,
+    }
+    first = EventKey.build(**common, host="WOOD TV8")
+    reworded = EventKey.build(**common, host="wood-tv8")
+
+    assert first is not None and reworded is not None
+    assert str(first) == str(reworded)
+    assert str(first) == ("ocd-division/country:us/state:mi/debate/2026-07-07/wood-tv8")
+
+
+def test_the_clock_time_does_not_change_the_key() -> None:
+    """One source says 8pm, another says 8:30. Still one debate."""
+
+    def at(hour: int, minute: int) -> EventKey | None:
+        return EventKey.build(
+            division=MICHIGAN,
+            kind=PoliticalEventKind.DEBATE,
+            moment=datetime(2026, 7, 7, hour, minute, tzinfo=UTC),
+            precision=TimePrecision.MINUTE,
+        )
+
+    assert str(at(20, 0)) == str(at(20, 30))
+
+
+def test_two_debates_on_one_day_stay_apart_when_hosts_differ() -> None:
+    """Wrongly merging two real events loses data; a fork only makes noise."""
+
+    def hosted(host: str) -> EventKey | None:
+        return EventKey.build(
+            division=MICHIGAN,
+            kind=PoliticalEventKind.DEBATE,
+            moment=datetime(2026, 7, 7, tzinfo=UTC),
+            precision=TimePrecision.DAY,
+            host=host,
+        )
+
+    assert str(hosted("WOOD TV8")) != str(hosted("Fox 2 Detroit"))
+
+
+def test_a_debate_and_a_town_hall_are_not_the_same_event() -> None:
+    def of_kind(kind: PoliticalEventKind) -> EventKey | None:
+        return EventKey.build(
+            division=MICHIGAN,
+            kind=kind,
+            moment=datetime(2026, 7, 7, tzinfo=UTC),
+            precision=TimePrecision.DAY,
+        )
+
+    assert str(of_kind(PoliticalEventKind.DEBATE)) != str(
+        of_kind(PoliticalEventKind.TOWN_HALL)
+    )
+
+
+@pytest.mark.parametrize("precision", [TimePrecision.YEAR, TimePrecision.MONTH])
+def test_a_vague_date_yields_no_key(precision: TimePrecision) -> None:
+    """ "September 2026" cannot key an event without inventing a day.
+
+    Returning None makes the caller fall back to the title rather than merging
+    every debate that month into one entity.
+    """
+
+    assert (
+        EventKey.build(
+            division=MICHIGAN,
+            kind=PoliticalEventKind.DEBATE,
+            moment=datetime(2026, 9, 1, tzinfo=UTC),
+            precision=precision,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        EventKey(MICHIGAN, PoliticalEventKind.DEBATE, date(2026, 7, 7)),
+        EventKey(MICHIGAN, PoliticalEventKind.DEBATE, date(2026, 7, 7), "wood-tv8"),
+        EventKey(
+            "ocd-division/country:us/state:mi/cd:11",
+            PoliticalEventKind.TOWN_HALL,
+            date(2026, 3, 1),
+            "fox-2-detroit",
+        ),
+    ],
+)
+def test_an_event_key_round_trips(key: EventKey) -> None:
+    """Parsing survives a division full of slashes and an optional host."""
+
+    assert EventKey.parse(str(key)) == key
+
+
+def test_the_event_namespace_is_registered() -> None:
+    specs = {spec.namespace: spec for spec in NAMESPACE_SPECS}
+    assert specs[EVENT_KEY_NAMESPACE].authority is None
+    assert specs[EVENT_KEY_NAMESPACE].precedence > specs["wikidata"].precedence

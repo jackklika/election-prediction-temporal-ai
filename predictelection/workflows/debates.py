@@ -136,6 +136,7 @@ def _already_recorded(known: FindEntitiesOutput) -> str:
         else ""
     )
     return (
-        "\n\nALREADY RECORDED — reuse these titles exactly if you find the "
-        f"same debate:\n{lines}{caveat}"
+        "\n\nALREADY RECORDED — these debates are in the graph already. Still "
+        "report any of them you find; use the title exactly as written here "
+        f"when you do:\n{lines}{caveat}"
     )

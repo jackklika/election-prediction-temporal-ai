@@ -1,4 +1,9 @@
-"""Contest identity, so three independent sources land on one CONTEST entity.
+"""Derived identity: contests, offices, elections and events.
+
+Named for contests because that is where it started; it now holds every key this
+project derives rather than reads. Worth renaming if it grows again.
+
+The shared argument, and the reason these are not names:
 
 Phase 1 writes contests from an OCD importer, an FEC importer and an agent, none
 of which can see the others. If identity is a name they fork immediately, and
@@ -31,14 +36,16 @@ parties, not within one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime as dt
 import re
 
-from predictelection.sql import ContestStage
+from predictelection.sql import ContestStage, PoliticalEventKind, TimePrecision
 
 
 CONTEST_KEY_NAMESPACE = "contest-key"
 OFFICE_KEY_NAMESPACE = "office-key"
 ELECTION_KEY_NAMESPACE = "election-key"
+EVENT_KEY_NAMESPACE = "event-key"
 
 _DIVISION_PATTERN = re.compile(r"^ocd-division/[a-z0-9:_~.\-/]+$")
 _SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -263,6 +270,117 @@ class ElectionKey:
     def label(self) -> str:
         where = _division_label(self.division)
         return f"{where} {self.cycle} {self.stage.value.title()} Election"
+
+
+DAY_OR_FINER: frozenset[TimePrecision] = frozenset(
+    {
+        TimePrecision.DAY,
+        TimePrecision.HOUR,
+        TimePrecision.MINUTE,
+        TimePrecision.SECOND,
+        TimePrecision.EXACT,
+    }
+)
+"""Precisions that pin an event to a calendar day.
+
+A source that only said "September 2026" cannot key an event: the date is the
+discriminator, and inventing one would merge every debate that month.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class EventKey:
+    """When and where an event happened, instead of what someone called it.
+
+    This is the identity failure the whole data model roadmap opens with: two
+    runs on one subject produced 11 event entities for 6 real debates, because
+    the agent re-phrased each title — `(WOOD TV8` vs `(WOOD-TV`, `First` and
+    `Second` prefixes, words reordered. Every other entity kind here now
+    resolves on a derived key; events were the last one still resolving on a
+    name, which is doubly odd given they are where the problem was measured.
+
+    Date is the discriminator that names cannot supply: two debates a month
+    apart share nearly all of their words, while the same debate described twice
+    shares a date. `host` separates the rarer case of two events in one place on
+    one day — without it they would merge, and wrongly merging two real events
+    loses data in a way a fork does not.
+
+    Deliberately built from the *resolved* jurisdiction's OCD division rather
+    than from whatever the source called the place, and only when that division
+    exists. A key that sometimes came from an OCD ID and sometimes from a name
+    would fork on exactly the axis it is meant to fix, so no division means no
+    key and the event falls back to resolving by title.
+    """
+
+    division: str
+    kind: PoliticalEventKind
+    date: dt.date
+    host: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _DIVISION_PATTERN.match(self.division):
+            raise ValueError(f"not an OCD division ID: {self.division!r}")
+        if self.host is not None and not _SLUG_PATTERN.match(self.host):
+            raise ValueError(f"host must be a slug, got {self.host!r}")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        division: str,
+        kind: PoliticalEventKind,
+        moment: dt.datetime,
+        precision: TimePrecision,
+        host: str | None = None,
+    ) -> EventKey | None:
+        """Normalizing constructor. None when the source was too vague to key."""
+
+        if precision not in DAY_OR_FINER:
+            return None
+        return cls(
+            division=division.strip().lower(),
+            kind=kind,
+            date=moment.date(),
+            host=normalize_slug(host) if host else None,
+        )
+
+    @classmethod
+    def parse(cls, value: str) -> EventKey:
+        """Split from the right — the division contains slashes of its own."""
+
+        head, _, tail = value.rpartition("/")
+        try:
+            date = dt.date.fromisoformat(tail)
+            host = None
+        except ValueError:
+            host = tail
+            head, _, date_text = head.rpartition("/")
+            date = dt.date.fromisoformat(date_text)
+
+        division, _, kind = head.rpartition("/")
+        if not division:
+            raise ValueError(f"not an event key: {value!r}")
+        return cls(
+            division=division,
+            kind=PoliticalEventKind(kind),
+            date=date,
+            host=host,
+        )
+
+    def __str__(self) -> str:
+        parts = [self.division, self.kind.value, self.date.isoformat()]
+        if self.host is not None:
+            parts.append(self.host)
+        return "/".join(parts)
+
+    @property
+    def label(self) -> str:
+        where = _division_label(self.division)
+        who = f" ({self.host.replace('-', ' ').title()})" if self.host else ""
+        return (
+            f"{where} {self.kind.value.replace('_', ' ').title()} "
+            f"{self.date.isoformat()}{who}"
+        )
 
 
 def _division_label(division: str) -> str:

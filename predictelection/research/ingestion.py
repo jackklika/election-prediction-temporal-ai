@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from predictelection.research.archive import SourceArchive
@@ -28,6 +29,7 @@ from predictelection.research.scraped import ScrapedEntity
 from predictelection.sql import (
     ClaimAssertion,
     ClaimOutcome,
+    EntityIdentifier,
     EntityKind,
     EntityMention,
     EvidenceLocator,
@@ -131,6 +133,23 @@ class IngestContext:
         else:
             mention = EntityMention(kind=kind, name=named)
         return resolve_entity_mention(self.session, mention)
+
+    def identifier_for(self, entity_id: uuid.UUID, namespace: str) -> str | None:
+        """An identifier already on a resolved entity, if it carries one.
+
+        Lets a derived key be built from what resolution *found* rather than
+        from what the source said. A jurisdiction reported as "Michigan" and
+        resolved to the entity the OCD import created yields that entity's
+        `ocd-division` ID, so an event key built on it does not vary with how
+        the place was worded.
+        """
+
+        return self.session.scalars(
+            select(EntityIdentifier.value).where(
+                EntityIdentifier.entity_id == entity_id,
+                EntityIdentifier.namespace == namespace,
+            )
+        ).first()
 
     def record(
         self,

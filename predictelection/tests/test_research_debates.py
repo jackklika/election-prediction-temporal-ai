@@ -20,12 +20,14 @@ from predictelection.research import (
     SourceArchive,
     ingest_debate,
 )
+from predictelection.research.contests import EVENT_KEY_NAMESPACE
 from predictelection.sql import (
     Artifact,
     ArtifactDerivationKind,
     Claim,
     ClaimAssertion,
     Entity,
+    EntityIdentifier,
     EntityKind,
     ResearchRun,
     ResearchRunStatus,
@@ -275,3 +277,123 @@ def test_the_store_refuses_a_uri_it_does_not_own(object_store) -> None:
         object_store.get("gs://some-bucket/sha256/aa/bb/cc")
     with pytest.raises(ObjectNotFound):
         object_store.get(f"s3://{object_store.bucket}/sha256/aa/bb/{'a' * 64}")
+
+
+MICHIGAN_OCD = "ocd-division/country:us/state:mi"
+
+
+def _keyed(**overrides: Any) -> ScrapedDebate:
+    """A debate whose jurisdiction carries an OCD ID, so the event can be keyed."""
+
+    base: dict[str, Any] = {
+        "jurisdiction": ScrapedEntity(name="Michigan", ocd_id=MICHIGAN_OCD),
+        "starts_at": datetime(2026, 7, 7, 20, 0, tzinfo=UTC),
+        "starts_at_precision": TimePrecision.MINUTE,
+        "host": "WOOD TV8",
+    }
+    return _debate(**(base | overrides))
+
+
+def test_a_rephrased_title_lands_on_the_same_event(session: Session, snapshot) -> None:
+    """The measured failure: 11 event entities for 6 real debates.
+
+    Both titles below are ones the agent actually produced for one debate
+    across two runs. Identity is now the date and place, which it did not
+    re-phrase.
+    """
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    first = ingest_debate(
+        _keyed(title="Michigan Democratic U.S. Senate Primary Debate (WOOD TV8)"),
+        context,
+    )
+    second = ingest_debate(
+        _keyed(title="Michigan Democratic U.S. Senate Debate (WOOD-TV, Grand Rapids)"),
+        context,
+    )
+    session.flush()
+
+    assert second.subject_entity_id == first.subject_entity_id
+    assert second.subject_created is False
+    assert (
+        session.scalar(
+            select(func.count(Entity.id)).where(Entity.kind == EntityKind.EVENT)
+        )
+        == 1
+    )
+
+
+def test_two_debates_the_same_day_stay_apart_when_hosts_differ(
+    session: Session, snapshot
+) -> None:
+    """Merging two real events loses data; only the fork is recoverable."""
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    wood = ingest_debate(_keyed(title="A", host="WOOD TV8"), context)
+    fox = ingest_debate(_keyed(title="B", host="Fox 2 Detroit"), context)
+    session.flush()
+
+    assert wood.subject_entity_id != fox.subject_entity_id
+
+
+def test_a_debate_on_another_day_is_a_different_event(
+    session: Session, snapshot
+) -> None:
+    context = IngestContext(session=session, snapshot=snapshot)
+    july = ingest_debate(_keyed(title="A"), context)
+    august = ingest_debate(
+        _keyed(title="A", starts_at=datetime(2026, 8, 7, 20, 0, tzinfo=UTC)), context
+    )
+    session.flush()
+
+    assert july.subject_entity_id != august.subject_entity_id
+
+
+def test_without_an_ocd_jurisdiction_identity_falls_back_to_the_title(
+    session: Session, snapshot
+) -> None:
+    """Unchanged behaviour before the OCD import has run.
+
+    Deliberate: a key derived from an OCD ID some of the time and a name the
+    rest of the time would fork on exactly the axis it exists to fix.
+    """
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    first = ingest_debate(
+        _debate(title="One wording", jurisdiction=ScrapedEntity(name="Michigan")),
+        context,
+    )
+    second = ingest_debate(
+        _debate(title="Another wording", jurisdiction=ScrapedEntity(name="Michigan")),
+        context,
+    )
+    session.flush()
+
+    assert first.subject_entity_id != second.subject_entity_id
+
+
+def test_a_vague_date_falls_back_to_the_title(session: Session, snapshot) -> None:
+    """ "September 2026" must not merge every debate that month."""
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    result = ingest_debate(
+        _keyed(
+            title="Vague",
+            starts_at=datetime(2026, 9, 1, tzinfo=UTC),
+            starts_at_precision=TimePrecision.MONTH,
+        ),
+        context,
+    )
+    session.flush()
+
+    event = session.get(Entity, result.subject_entity_id)
+    assert event is not None and event.canonical_name == "Vague"
+    assert (
+        session.scalars(
+            select(EntityIdentifier).where(
+                EntityIdentifier.entity_id == event.id,
+                EntityIdentifier.namespace == EVENT_KEY_NAMESPACE,
+            )
+        ).first()
+        is None
+    )

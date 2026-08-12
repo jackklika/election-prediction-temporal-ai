@@ -182,6 +182,16 @@ NAMESPACE_SPECS: tuple[NamespaceSpec, ...] = (
         authority=None,
         precedence=60,
     ),
+    NamespaceSpec(
+        namespace="event-key",
+        label="Derived event key",
+        # Division, kind and date, plus a host when two events share a day.
+        # This is the identity that was actually measured breaking: two runs on
+        # one subject produced 11 event entities for 6 real debates purely from
+        # re-phrased titles. A date does not get re-phrased.
+        authority=None,
+        precedence=60,
+    ),
 )
 
 

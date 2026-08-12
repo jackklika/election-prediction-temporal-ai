@@ -53,10 +53,14 @@ Rules that matter more than completeness, and apply to everything you report:
   it is the right one. A wrong identifier merges two different things, which is
   far more damaging than leaving it null.
 - Prefer official or primary sources over aggregators.
-- Anything listed in the prompt under ALREADY RECORDED is already in the graph.
-  If you find the same thing, REPORT IT UNDER THAT EXACT NAME, character for
-  character. Re-describing it creates a duplicate nobody can automatically
-  merge — the same thing under two names is worse than reporting it once.
+- REPORT EVERYTHING YOU FIND, including anything already listed under ALREADY
+  RECORDED. Re-reporting something already in the graph is not a duplicate and
+  is not wasted work: it is how a second source corroborates a fact, and it is
+  the only way to tell "there is nothing more to find" apart from "you did not
+  look". Never leave a record out because it is already listed.
+- When you report something that IS on that list, use its name from the list,
+  character for character. Reporting it under a new wording is what creates a
+  duplicate nobody can automatically merge.
 """
 
 DEFAULT_EFFORT: Effort = "medium"

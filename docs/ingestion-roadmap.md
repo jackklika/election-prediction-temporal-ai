@@ -177,6 +177,19 @@ without ever agreeing on a name. Three rules:
 - **Derive, do not ask.** A model handed a key format produces plausible keys,
   and a plausible-but-wrong key mints a contest nothing else will resolve to.
   Ask for the components; compute the key in the ingestor.
+- **Mark a derived key `identifiers_are_authoritative=True`.** Resolution
+  normally falls back to name matching when an identifier misses, which is right
+  for a *read* identifier — the OCD import saying "Michigan" should adopt the
+  Michigan a debate already created. It is wrong for a *derived* key, where the
+  identifier is the definition: two debates sharing a title on different days
+  merged on the name, and the survivor carried both keys.
+- **Events are keyed too**, on division, kind and date, plus a host when two
+  share a day — `EventKey`. This is the identity the roadmap opened with (11
+  event entities for 6 real debates) and it was the last kind still resolving on
+  a name. Keyed only when the resolved jurisdiction carries an OCD division and
+  the source gave a date to day precision; otherwise it falls back to the title,
+  deliberately, because a key derived from an ID some of the time and a name the
+  rest would fork on exactly the axis it exists to fix.
 - **The district lives in the division**, as OCD writes it — office `us-house`,
   division `.../state:mi/cd:11`. That is what lets a contest join to the
   jurisdiction the OCD import created.

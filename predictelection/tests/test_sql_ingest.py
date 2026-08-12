@@ -375,3 +375,83 @@ def test_every_seeded_predicate_round_trips(session: Session) -> None:
             origin=RecordOrigin.MODEL,
         )
         assert recorded.assertion.ontology_aligned is True, spec.slug
+
+
+def test_an_unknown_authoritative_identifier_mints_rather_than_merging(
+    session: Session,
+) -> None:
+    """A derived key is the definition of the entity, not a fact about it.
+
+    Without this, two debates that share a title but not a date resolve to one
+    entity by name, and the survivor ends up carrying both keys — worse than
+    either a clean merge or a clean fork.
+    """
+
+    def mention(key: str) -> EntityMention:
+        return EntityMention(
+            kind=EntityKind.EVENT,
+            name="Michigan Senate Debate",
+            identifiers=(ExternalIdentifier(namespace="event-key", value=key),),
+            identifiers_are_authoritative=True,
+        )
+
+    july = resolve_entity_mention(session, mention("a/debate/2026-07-07"))
+    august = resolve_entity_mention(session, mention("a/debate/2026-08-07"))
+    session.flush()
+
+    assert july.entity_id != august.entity_id
+    assert august.created is True
+
+
+def test_a_known_authoritative_identifier_still_resolves_to_its_entity(
+    session: Session,
+) -> None:
+    """Authoritative changes the miss path only; a hit is still a hit."""
+
+    def mention(name: str) -> EntityMention:
+        return EntityMention(
+            kind=EntityKind.EVENT,
+            name=name,
+            identifiers=(
+                ExternalIdentifier(namespace="event-key", value="a/debate/2026-07-07"),
+            ),
+            identifiers_are_authoritative=True,
+        )
+
+    first = resolve_entity_mention(session, mention("One wording"))
+    second = resolve_entity_mention(session, mention("A quite different wording"))
+    session.flush()
+
+    assert second.entity_id == first.entity_id
+    assert second.created is False
+
+
+def test_an_ordinary_identifier_still_attaches_to_a_name_match(
+    session: Session,
+) -> None:
+    """The default must stay a merge, or the OCD import forks the graph.
+
+    "Michigan" with an ocd-division ID should adopt the Michigan a debate
+    already created, not mint a second one beside it.
+    """
+
+    from_debate = resolve_entity_mention(
+        session, EntityMention(kind=EntityKind.JURISDICTION, name="Michigan")
+    )
+    from_ocd = resolve_entity_mention(
+        session,
+        EntityMention(
+            kind=EntityKind.JURISDICTION,
+            name="Michigan",
+            identifiers=(
+                ExternalIdentifier(
+                    namespace="ocd-division",
+                    value="ocd-division/country:us/state:mi",
+                ),
+            ),
+        ),
+    )
+    session.flush()
+
+    assert from_ocd.entity_id == from_debate.entity_id
+    assert from_ocd.created is False

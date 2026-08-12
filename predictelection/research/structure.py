@@ -211,6 +211,10 @@ def _derived(kind: EntityKind, namespace: str, value: str, label: str) -> Entity
         kind=kind,
         name=label,
         identifiers=(ExternalIdentifier(namespace=namespace, value=value),),
+        # Same argument as for events: a derived key is the definition of the
+        # entity, so a key we have not seen is a new entity even if its label
+        # happens to match one.
+        identifiers_are_authoritative=True,
     )
 
 
