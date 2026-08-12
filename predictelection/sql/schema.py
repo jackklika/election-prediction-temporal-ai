@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from predictelection.sql.base import Base
@@ -22,6 +22,11 @@ from predictelection.sql.predicate import seed_predicates
 def create_schema(engine: Engine) -> None:
     """Create all registered tables and seed immutable predicate contracts."""
 
+    with engine.begin() as connection:
+        # Before create_all: the trigram index on entity_alias needs the
+        # extension to exist at CREATE INDEX time. Migration 0002 does the same
+        # for databases that upgrade instead of being created.
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
     with Session(engine) as session, session.begin():
         seed_identifier_namespaces(session)

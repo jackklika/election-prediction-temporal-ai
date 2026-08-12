@@ -383,6 +383,60 @@ class EventKey:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PollKey:
+    """Which poll this is, independent of who reported it.
+
+    A poll has no published identifier — FiveThirtyEight, Wikipedia and
+    Ballotpedia each describe "the EPIC-MRA poll of the Michigan Senate primary
+    that finished fielding July 28" in their own words. Pollster, contest and
+    fieldwork end date are the coordinates they all state, so they are the
+    identity; everything else (numbers, sample, wording) is *content*, and
+    content dedup is the payload hash one level down.
+
+    Fieldwork end rather than publication date: publication varies by outlet
+    (Wikipedia dates the release, an aggregator dates the entry), fieldwork is a
+    property of the poll itself. A source that does not state fieldwork dates
+    cannot key the poll — the caller falls back to an unkeyed Poll row and a
+    ReviewTask, rather than this class inventing a date.
+    """
+
+    contest: ContestKey
+    pollster: str
+    fieldwork_end: dt.date
+
+    def __post_init__(self) -> None:
+        if not _SLUG_PATTERN.match(self.pollster):
+            raise ValueError(f"pollster must be a slug, got {self.pollster!r}")
+
+    @classmethod
+    def build(
+        cls, *, contest: ContestKey, pollster: str, fieldwork_end: dt.date
+    ) -> PollKey:
+        return cls(
+            contest=contest,
+            pollster=normalize_slug(pollster),
+            fieldwork_end=fieldwork_end,
+        )
+
+    @classmethod
+    def parse(cls, value: str) -> PollKey:
+        """Contest first (variable segments), pollster and date at the end."""
+
+        head, _, date_text = value.rpartition("/")
+        contest_text, _, pollster = head.rpartition("/")
+        if not contest_text:
+            raise ValueError(f"not a poll key: {value!r}")
+        return cls(
+            contest=ContestKey.parse(contest_text),
+            pollster=pollster,
+            fieldwork_end=dt.date.fromisoformat(date_text),
+        )
+
+    def __str__(self) -> str:
+        return f"{self.contest}/{self.pollster}/{self.fieldwork_end.isoformat()}"
+
+
 def _division_label(division: str) -> str:
     """A short human name for a division, for labelling a minted entity.
 

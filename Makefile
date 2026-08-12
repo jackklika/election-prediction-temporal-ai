@@ -54,6 +54,18 @@ worker: db-up
 # Start a real research run. Needs `make worker` alongside it, and spends
 # Anthropic credit. Watch it at http://localhost:8080
 #   make research SUBJECT="Abdul El-Sayed"
+import-ocd: db-up
+	S3_ENDPOINT_URL=http://localhost:9000 \
+	S3_ACCESS_KEY_ID=minioadmin \
+	S3_SECRET_ACCESS_KEY=minioadmin \
+	uv run python -m predictelection.importers.run ocd
+
+import-fec: db-up
+	S3_ENDPOINT_URL=http://localhost:9000 \
+	S3_ACCESS_KEY_ID=minioadmin \
+	S3_SECRET_ACCESS_KEY=minioadmin \
+	uv run python -m predictelection.importers.run fec --cycle "$(or $(CYCLE),2026)"
+
 #   make research SUBJECT="Michigan governor 2026" KIND=structure
 research:
 	@test -n "$(SUBJECT)" || (echo 'usage: make research SUBJECT="Abdul El-Sayed" [KIND=debates|structure]'; exit 1)

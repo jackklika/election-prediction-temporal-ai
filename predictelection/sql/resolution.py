@@ -195,6 +195,33 @@ def _match_by_alias(
     return entity, ()
 
 
+def _contradicts(
+    session: Session,
+    entity: Entity,
+    identifiers: tuple[ExternalIdentifier, ...],
+) -> bool:
+    """Whether this entity already carries a *different* value in any namespace
+    the mention asserts.
+
+    Carrying no identifier in that namespace is not a contradiction — that is
+    the adoption case, where the OCD import attaches an ID to the "Michigan" a
+    debate created by name. Carrying the *same* value is agreement. Only a
+    differing value says the name match found a namesake, not the thing itself.
+    """
+
+    for identifier in identifiers:
+        normalized = identifier.normalized()
+        existing = session.scalars(
+            select(EntityIdentifier.value).where(
+                EntityIdentifier.entity_id == entity.id,
+                EntityIdentifier.namespace == normalized.namespace,
+            )
+        ).all()
+        if existing and normalized.value not in existing:
+            return True
+    return False
+
+
 def _record_alias(session: Session, entity: Entity, name: str) -> None:
     """Keep the observed surface form, so the match index grows as we read.
 
@@ -268,6 +295,14 @@ def resolve_entity_mention(session: Session, mention: EntityMention) -> Resoluti
             session, kind=mention.kind, normalized_name=normalized_name
         )
         method = ResolutionMethod.ALIAS
+        if entity is not None and _contradicts(session, entity, mention.identifiers):
+            # Same name, different identity. "Washington township" exists in
+            # every state; a name match that already owns another value in a
+            # namespace this mention asserts is a different thing that happens
+            # to share a name, and merging them once put 154 townships into one
+            # entity. Mint instead — a fork is visible and repairable, a merge
+            # is neither.
+            entity = None
 
     if entity is None:
         entity = Entity(kind=mention.kind, canonical_name=mention.name)

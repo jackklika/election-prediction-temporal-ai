@@ -24,7 +24,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+import io
 from typing import ClassVar
+import zipfile
 
 from predictelection.importers.base import (
     FilteredParse,
@@ -116,7 +118,7 @@ class FecCandidateImporter(Importer):
         skipped = 0
 
         for row in rows_from_delimited(
-            raw, fieldnames=CANDIDATE_MASTER_COLUMNS, delimiter="|"
+            _unwrapped(raw), fieldnames=CANDIDATE_MASTER_COLUMNS, delimiter="|"
         ):
             if not _usable(row, self.offices, self.cycle):
                 skipped += 1
@@ -166,6 +168,28 @@ class FecCandidateImporter(Importer):
             subject_created=person.created,
             related_entity_ids=(contest.entity_id,),
         )
+
+
+def _unwrapped(raw: bytes) -> bytes:
+    """The pipe-delimited text, whether it arrived bare or zipped.
+
+    The FEC publishes `cn26.zip` containing a single `cn.txt`. The *zip* is what
+    gets archived — those are the bytes fetched, and provenance stores what was
+    observed, not a transformation of it — so unwrapping belongs here in parse.
+    Row locators still point into the extracted text, which is reproducible from
+    the archived zip by anyone.
+
+    Loud on surprises: a zip with several members means the FEC changed the
+    packaging, and guessing a member would silently parse the wrong file.
+    """
+
+    if not raw.startswith(b"PK\x03\x04"):
+        return raw
+    archive = zipfile.ZipFile(io.BytesIO(raw))
+    members = archive.namelist()
+    if len(members) != 1:
+        raise ValueError(f"expected one member in the FEC zip, found {members}")
+    return archive.read(members[0])
 
 
 def _usable(row: ImportRow, offices: frozenset[str], cycle: int) -> bool:

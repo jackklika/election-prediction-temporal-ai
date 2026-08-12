@@ -227,6 +227,19 @@ while pointed straight at production data. A safety check that silently does
 nothing is worse than none; `test_conftest_guard.py` exists to keep this one
 honest.
 
+**A name-fallback merge put 154 townships into one entity.** The first real OCD
+run resolved 47,039 divisions into 33,229 entities: every "Washington township"
+after the first missed on its (new) identifier, fell back to the name tier,
+matched the first one imported, and deposited its OCD ID on it — 5,124 entities
+absorbed ~19k identifiers, and no test caught it because fixtures never
+contained namesakes. The fix is in resolution: a name match that already carries
+a *different* value in a namespace the mention asserts is a namesake, not the
+thing itself, so it mints. Carrying *no* value in that namespace is still the
+adoption case (the OCD import attaching an ID to the "Michigan" a debate
+created), which must keep merging. Real reference data is the only fixture that
+contains this shape — run importers against the live file before trusting
+entity counts.
+
 **An agent activity that times out retries forever, paying each time.**
 `TemporalDurability` runs every model request as an activity, and Temporal's
 default retry policy is *unbounded*. A `start_to_close_timeout` that is merely
@@ -300,35 +313,48 @@ worth knowing if config reads empty.
 
 ## 6. Phase 2 — Polls
 
-**Goal:** the main predictive signal. This is the **largest ready-built surface in
-the schema**: nine `poll*` tables exist and **nothing writes any of them**.
+**Goal:** the main predictive signal. The identity and write layer is **built
+and tested** (`research/polls.py`); what remains is the source parser.
 
-**Mechanism:** importer. Aggregators publish CSVs; percentages must not come from
-an LLM.
+**Write through `ingest_poll`, nothing else.** It layers three identities, and
+each exists because a source will violate it:
 
-Polls do not fit the claim model, and should not be forced into it — they have
-their own tables. That means `run_import` gives you the archived file, the run
-and the row locator, but the writes go to `new_poll_revision` and friends rather
-than through `IngestContext.record`. Return an `Ingestion` with an empty
-`recorded` for the claim-shaped parts, as `OcdImporter` does.
+- `PollKey` — pollster + contest + fieldwork end — decides *which poll this is*,
+  so Wikipedia and Ballotpedia reporting the same survey land on one `Poll` row.
+  Stored in `Poll.external_namespace/external_id`. No fieldwork end date means
+  no key: the poll is stored unkeyed and flagged with a `ReviewTask`, never
+  given an invented date.
+- `payload_hash` decides whether this *reading* is new. The payload excludes
+  `source_url` deliberately — two outlets printing the same numbers must hash
+  identically. A *different* reading of a keyed poll becomes a second revision
+  plus a `ReviewTask`: disagreement is surfaced, never averaged.
+- Fuzzy checks **flag, never merge**: a trigram near-miss on the pollster name
+  (pg_trgm, migration 0002) or a same-pollster same-contest poll with fieldwork
+  ending within 3 days files a `ReviewTask` and proceeds.
 
-**Use the builders.** `new_poll_revision` derives `payload_hash` (constructing
-`PollRevision` directly defeats the dedup key). `new_poll_option` and
-`new_poll_estimate` carry `poll_revision_id`, which is what stops an estimate
-pairing an option from one revision with a crosstab from another — a composite
-foreign key enforces it, so hand-built rows will simply be rejected.
+**Pollsters resolve by slug** (`resolve_pollster`): "EPIC-MRA", "EPIC MRA" and
+"EPIC/MRA" collapse via a slug alias; anything less exact goes to review.
+Candidate columns are stored as verbatim option labels with `choice_entity_id`
+NULL — resolving "Rogers" belongs to whoever knows the contest's candidates
+(`candidate_in`), not to the poll writer.
+
+**Next: the Wikipedia importer.** Parse raw HTML (`<table>`s vanish in
+markdown/readability conversion — verified), one importer parameterized by race
+page; the polling section a table sits under (D primary / R primary / general)
+*is* the contest's stage and party. Validate table shape loudly: assert expected
+headers, skip aggregate rows, refuse rows whose percentages misalign. A poll's
+contest resolves by `ContestKey`, never by name.
 
 **Model note:** the pollster is not the source. `PollRevision.source_snapshot_id`
 points at where you read it; `pollster_id` at who conducted it. A secondary source
 reporting someone else's poll is normal and the schema expects it.
 
-A poll's contest should resolve by `ContestKey`, not by name.
-
-**Acceptance:**
-- Importing the same file twice creates no second `PollRevision` (the payload
-  hash catches it).
-- A revised release of the same poll creates a new revision that supersedes,
-  with both retrievable.
+**Acceptance** (first three already pass in `test_research_polls.py`):
+- Importing the same reading twice writes nothing.
+- A second outlet with identical numbers is a no-op; a disagreeing one is a
+  second revision plus a `ReviewTask`.
+- Punctuation variants of a pollster resolve to one entity; lookalikes fork
+  with a `ReviewTask`.
 - A crosstab estimate cannot be attached across revisions — assert the
   `IntegrityError`.
 

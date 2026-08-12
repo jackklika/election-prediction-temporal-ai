@@ -177,6 +177,16 @@ class EntityAlias(Immutable, Base):
             name="names_nonempty",
         ),
         Index("ix_entity_alias_normalized_name", "normalized_name"),
+        # Trigram index for fuzzy candidate lookup during pollster resolution.
+        # Declared here rather than only in the migration so autogenerate and
+        # the drift test see one source of truth; needs pg_trgm, which
+        # create_schema and migration 0002 both ensure.
+        Index(
+            "ix_entity_alias_normalized_trgm",
+            "normalized_name",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_name": "gin_trgm_ops"},
+        ),
     )
 
 

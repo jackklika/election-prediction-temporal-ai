@@ -455,3 +455,89 @@ def test_an_ordinary_identifier_still_attaches_to_a_name_match(
 
     assert from_ocd.entity_id == from_debate.entity_id
     assert from_ocd.created is False
+
+
+def test_namesake_jurisdictions_with_different_identifiers_stay_apart(
+    session: Session,
+) -> None:
+    """ "Washington township" exists in every state.
+
+    The real OCD import merged 154 of them into one entity: the identifier
+    missed (each township's ID was new), resolution fell back to the name, and
+    the name matched the first township imported. A name match that contradicts
+    an asserted identifier is a namesake, not the thing itself.
+    """
+
+    def township(state: str) -> EntityMention:
+        return EntityMention(
+            kind=EntityKind.JURISDICTION,
+            name="Washington township",
+            identifiers=(
+                ExternalIdentifier(
+                    namespace="ocd-division",
+                    value=f"ocd-division/country:us/state:{state}/place:washington",
+                ),
+            ),
+        )
+
+    ohio = resolve_entity_mention(session, township("oh"))
+    indiana = resolve_entity_mention(session, township("in"))
+    session.flush()
+
+    assert ohio.entity_id != indiana.entity_id
+    assert indiana.created is True
+
+
+def test_an_identifier_free_entity_is_still_adopted_by_name(
+    session: Session,
+) -> None:
+    """The counterpart that must keep working: attaching an ID to a name.
+
+    A debate mentions "Michigan" with no identifier; the OCD import then
+    arrives with the division ID. No contradiction — the debate's Michigan has
+    no competing identity — so the ID lands on the existing entity rather than
+    minting a twin.
+    """
+
+    from_debate = resolve_entity_mention(
+        session, EntityMention(kind=EntityKind.JURISDICTION, name="Michigan")
+    )
+    from_ocd = resolve_entity_mention(
+        session,
+        EntityMention(
+            kind=EntityKind.JURISDICTION,
+            name="Michigan",
+            identifiers=(
+                ExternalIdentifier(
+                    namespace="ocd-division",
+                    value="ocd-division/country:us/state:mi",
+                ),
+            ),
+        ),
+    )
+    session.flush()
+
+    assert from_ocd.entity_id == from_debate.entity_id
+
+
+def test_agreement_on_an_identifier_still_merges(session: Session) -> None:
+    """Same name, same identifier value: agreement, not contradiction."""
+
+    def michigan() -> EntityMention:
+        return EntityMention(
+            kind=EntityKind.JURISDICTION,
+            name="Michigan",
+            identifiers=(
+                ExternalIdentifier(
+                    namespace="ocd-division",
+                    value="ocd-division/country:us/state:mi",
+                ),
+            ),
+        )
+
+    first = resolve_entity_mention(session, michigan())
+    second = resolve_entity_mention(session, michigan())
+    session.flush()
+
+    assert second.entity_id == first.entity_id
+    assert second.created is False

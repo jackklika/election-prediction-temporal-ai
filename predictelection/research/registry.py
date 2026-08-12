@@ -31,6 +31,7 @@ from pydantic import Field
 
 from predictelection.research.debates import ScrapedDebate, ingest_debate
 from predictelection.research.ingestion import Ingestion, IngestContext
+from predictelection.research.polls import ScrapedPoll, ingest_poll
 from predictelection.research.scraped import ScrapedRecord
 from predictelection.research.structure import (
     ScrapedRaceStructure,
@@ -39,7 +40,7 @@ from predictelection.research.structure import (
 
 
 ScrapedPayload = Annotated[
-    ScrapedDebate | ScrapedRaceStructure,
+    ScrapedDebate | ScrapedRaceStructure | ScrapedPoll,
     Field(discriminator="record_type"),
 ]
 """Every record shape an activity may be handed.
@@ -56,6 +57,7 @@ Ingestor = Callable[[Any, IngestContext], Ingestion]
 INGESTORS: dict[type[ScrapedRecord], Ingestor] = {
     ScrapedDebate: ingest_debate,
     ScrapedRaceStructure: ingest_race_structure,
+    ScrapedPoll: ingest_poll,
 }
 
 
