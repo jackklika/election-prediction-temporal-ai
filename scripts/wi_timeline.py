@@ -6,108 +6,123 @@ across the dates is the property that proves withdrawals were recorded as
 intervals ending rather than rows changing.
 
     uv run python scripts/wi_timeline.py
+
+Also the standing check on `predictelection.query`. This script used to be a
+hundred lines of hand-written SQL — four separate joins from claim to entity to
+identifier, each rebuilt slightly differently — which is exactly the duplication
+the query module exists to end. It now contains no SQL at all. If a future
+question here cannot be asked through `query`, that is the module's gap to close
+rather than this file's to work around, and porting this back to raw SQL would
+hide the very thing it is meant to reveal.
+
+Writing it did close two: nothing could reach a claim's citation, and the
+projections dropped the claim id, so a result row could not be traced back to
+what said so. `query.evidence_for` and the `claim_id` fields are both here
+because this port needed them.
 """
 
+from datetime import UTC, datetime
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import sqlalchemy as sa
-from predictelection.clients.sqlalchemy_engine import PostgresConfig
-from predictelection.sql import get_predicate_spec
+from predictelection import query
+from predictelection.clients.sqlalchemy_engine import SqlAlchemyEngineClient
 
 CONTEST = "ocd-division/country:us/state:wi/governor/2026/primary/democratic"
-CAND = get_predicate_spec("candidate_in").predicate_version_id
-RESULT = get_predicate_spec("contest_result").predicate_version_id
-ENDORSED = get_predicate_spec("endorsed").predicate_version_id
 
-e = sa.create_engine(PostgresConfig().url)  # ty: ignore[missing-argument]
-with e.connect() as c:
-    print("=" * 74)
-    print("WHO WAS RUNNING — from validity intervals alone, no status column")
-    print("=" * 74)
-    for label, date in [
-        ("2026-05-01  (early)", "2026-05-01"),
-        ("2026-06-15  (before Crowley withdrew)", "2026-06-15"),
-        ("2026-07-10  (Crowley out, backing Rodriguez)", "2026-07-10"),
-        ("2026-07-20  (Rodriguez out too)", "2026-07-20"),
-        ("2026-08-11  (primary day)", "2026-08-11"),
-    ]:
-        names = [
-            r[0]
-            for r in c.execute(
-                sa.text("""
-            select distinct e.canonical_name
-            from claim cl
-            join entity e on e.id = cl.subject_id
-            join entity_identifier ci on ci.entity_id = cl.object_id
-            where cl.predicate_version_id = :v and ci.value = :k
-              and cl.valid_from <= :d
-              and (cl.valid_to is null or cl.valid_to > :d)
-            order by 1"""),
-                {"v": CAND, "k": CONTEST, "d": date},
-            )
-        ]
-        print(f"  {label:46} {', '.join(names) or '(nobody)'}")
+DATES = [
+    ("2026-05-01  (early)", "2026-05-01"),
+    ("2026-06-15  (before Crowley withdrew)", "2026-06-15"),
+    ("2026-07-10  (Crowley out, backing Rodriguez)", "2026-07-10"),
+    ("2026-07-20  (Rodriguez out too)", "2026-07-20"),
+    ("2026-08-11  (primary day)", "2026-08-11"),
+]
 
-    print()
-    print("=" * 74)
-    print("CANDIDACY STINTS — a re-entry is two claims, not an overwrite")
-    print("=" * 74)
-    for r in c.execute(
-        sa.text("""
-        select e.canonical_name, cl.valid_from::date, cl.valid_to::date,
-               cl.valid_from_precision, cl.valid_to_precision
-        from claim cl
-        join entity e on e.id = cl.subject_id
-        join entity_identifier ci on ci.entity_id = cl.object_id
-        where cl.predicate_version_id = :v and ci.value = :k
-        order by e.canonical_name, cl.valid_from"""),
-        {"v": CAND, "k": CONTEST},
-    ):
-        end = r[2] or "still running"
-        prec = f"[{r[3]}/{r[4] or '-'}]"
-        print(f"  {r[0]:24} {r[1]} → {str(end):14} {prec}")
+RULE = "=" * 74
 
-    print()
-    print("=" * 74)
-    print("ENDORSEMENTS — switches and withdrawals as separate intervals")
-    print("=" * 74)
-    rows = list(
-        c.execute(
-            sa.text("""
-        select er.canonical_name, ee.canonical_name,
-               cl.value->>'strength', cl.valid_from::date, cl.valid_to::date
-        from claim cl
-        join entity er on er.id = cl.subject_id
-        join entity ee on ee.id = cl.object_id
-        where cl.predicate_version_id = :v
-        order by cl.valid_from, er.canonical_name"""),
-            {"v": ENDORSED},
+
+def heading(text: str) -> None:
+    print(RULE)
+    print(text)
+    print(RULE)
+
+
+def day(value: str) -> datetime:
+    return datetime.fromisoformat(value).replace(tzinfo=UTC)
+
+
+with SqlAlchemyEngineClient().session_factory() as session:
+    contest_id = query.contest_by_key(session, CONTEST)
+    if contest_id is None:
+        raise SystemExit(f"no contest recorded for {CONTEST}")
+
+    heading("WHO WAS RUNNING — from validity intervals alone, no status column")
+    for label, value in DATES:
+        running = sorted(
+            stint.person.name
+            for stint in query.candidates_in(session, contest_id, at=day(value))
         )
+        print(f"  {label:46} {', '.join(running) or '(nobody)'}")
+
+    print()
+    heading("CANDIDACY STINTS — a re-entry is two claims, not an overwrite")
+    stints = sorted(
+        query.candidates_in(session, contest_id),
+        key=lambda stint: (stint.person.name, stint.started_at or datetime.min),
     )
-    for r in rows:
-        print(f"  {r[0]:22} → {r[1]:20} {r[2]:10} {r[3]} → {r[4] or 'open'}")
-    if not rows:
+    for stint in stints:
+        started = stint.started_at.date() if stint.started_at else "?"
+        ended = stint.ended_at.date() if stint.ended_at else "still running"
+        precision = f"[{stint.started_precision or '-'}/{stint.ended_precision or '-'}]"
+        print(f"  {stint.person.name:24} {started} → {str(ended):14} {precision}")
+
+    print()
+    heading("ENDORSEMENTS — switches and withdrawals as separate intervals")
+    # Ascending: `claims_with` returns newest first, which is right for a list
+    # and wrong for an arc.
+    endorsements = sorted(
+        query.claims_with(session, "endorsed"),
+        key=lambda row: (row.valid_from or datetime.min, row.subject.name),
+    )
+    for row in endorsements:
+        strength = (row.value or {}).get("strength", "?")
+        started = row.valid_from.date() if row.valid_from else "?"
+        ended = row.valid_to.date() if row.valid_to else "open"
+        backed = row.object.name if row.object else "(unnamed)"
+        print(
+            f"  {row.subject.name:22} → {backed:20} {strength:10} {started} → {ended}"
+        )
+    if not endorsements:
         print("  (none recorded)")
 
     print()
-    print("=" * 74)
-    print("RESULT — votes from the table, `won` from the Nominee heading")
-    print("=" * 74)
-    for r in c.execute(
-        sa.text("""
-        select e.canonical_name, (cl.value->>'votes')::int, cl.value->>'share',
-               cl.value->>'won', ea.excerpt
-        from claim cl
-        join entity e on e.id = cl.subject_id
-        join entity_identifier ci on ci.entity_id = cl.object_id
-        join claim_assertion ca on ca.claim_id = cl.id
-        join evidence_anchor ea on ea.id = ca.evidence_anchor_id
-        where cl.predicate_version_id = :v and ci.value = :k
-        order by 2 desc"""),
-        {"v": RESULT, "k": CONTEST},
-    ):
-        won = {"true": "WON", "false": "", None: "(not stated)"}.get(r[3], "")
-        print(f"  {r[0]:24} {r[1]:>8,} {r[2]:>6}%  {won:12} page said: {r[4][:34]}")
+    heading("RESULT — votes from the table, `won` from the Nominee heading")
+    results = query.results_for(session, contest_id)
+    citations = query.evidence_for(session, [result.claim_id for result in results])
+    for result in results:
+        won = {True: "WON", False: "", None: "(not stated)"}[result.won]
+        excerpt = next(
+            (
+                cited.excerpt
+                for cited in citations.get(result.claim_id, ())
+                if cited.excerpt
+            ),
+            "(no excerpt)",
+        )
+        votes = f"{result.votes:,}" if result.votes is not None else "?"
+        share = f"{result.share}" if result.share is not None else "?"
+        print(
+            f"  {result.candidate.name:24} {votes:>8} {share:>6}%  {won:12} "
+            f"page said: {excerpt[:34]}"
+        )
+
+    print()
+    heading("REVIEW — how much of the above anyone has checked")
+    backlog = query.unreviewed(session)
+    print(f"  open tasks       {backlog.open}")
+    print(
+        f"  decided          {backlog.decisions}"
+        f"  ({backlog.accepted} accepted, {backlog.rejected} rejected)"
+    )

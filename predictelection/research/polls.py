@@ -34,8 +34,7 @@ from typing import Literal
 import uuid
 
 from pydantic import Field
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from predictelection.research.contests import ContestKey, PollKey, normalize_slug
 from predictelection.research.ingestion import Ingestion, IngestContext
@@ -49,6 +48,7 @@ from predictelection.sql import (
     ReviewTask,
     get_or_create,
     new_entity_alias,
+    find_lookalikes,
     new_poll_estimate,
     new_poll_option,
     new_poll_revision,
@@ -61,16 +61,6 @@ POLL_KEY_NAMESPACE = "poll-key"
 """Written to Poll.external_namespace. Not in the identifier_namespace registry
 because Poll's external identity columns are free text scoped to the poll
 tables, not entity identifiers — the registry governs `entity_identifier`."""
-
-POLLSTER_SIMILARITY_FLOOR = 0.55
-"""Trigram similarity above which an unmatched pollster name is worth a look.
-
-Low deliberately: this feeds a ReviewTask, not a merge, so a false positive
-costs a reviewer seconds while a false negative is a silent fork.
-"""
-
-LOOKALIKE_LIMIT = 5
-"""Merge candidates shown per unmatched pollster — a queue entry, not a report."""
 
 NEAR_DUPLICATE_WINDOW = dt.timedelta(days=3)
 """Same pollster, same contest, fieldwork ending within this of an existing
@@ -173,33 +163,6 @@ class ResolvedPollster:
     automatically; surfaced so ingest can file a ReviewTask."""
 
 
-def pollster_lookalikes(
-    session: Session, slug: str, *, limit: int = LOOKALIKE_LIMIT
-) -> tuple[tuple[uuid.UUID, str], ...]:
-    """Organizations whose names sit above the trigram floor for this slug.
-
-    Public because review reads it too: the reviewer deciding a "resembles an
-    existing pollster" task is choosing between exactly these candidates, and a
-    second copy of the query there could drift from the one that filed the task —
-    offering a merge target the ingestor never actually considered.
-    """
-
-    similarity = func.similarity(EntityAlias.normalized_name, slug)
-    return tuple(
-        (entity_id, alias)
-        for entity_id, alias in session.execute(
-            select(EntityAlias.entity_id, EntityAlias.name)
-            .join(Entity, Entity.id == EntityAlias.entity_id)
-            .where(
-                Entity.kind == EntityKind.ORGANIZATION,
-                similarity >= POLLSTER_SIMILARITY_FLOOR,
-            )
-            .order_by(similarity.desc())
-            .limit(limit)
-        )
-    )
-
-
 def resolve_pollster(context: IngestContext, name: str) -> ResolvedPollster:
     """Name to ORGANIZATION entity, matching on slug so punctuation collapses.
 
@@ -242,7 +205,7 @@ def resolve_pollster(context: IngestContext, name: str) -> ResolvedPollster:
         )
         return ResolvedPollster(entity_id=canonical, created=False)
 
-    lookalikes = pollster_lookalikes(session, slug)
+    lookalikes = find_lookalikes(session, slug, kind=EntityKind.ORGANIZATION)
 
     resolved = context.resolve(EntityKind.ORGANIZATION, ScrapedEntity(name=name))
     if resolved.created:

@@ -1,4 +1,4 @@
-.PHONY: test test-db db-up db-down lint worker research demo migrate migration stamp \
+.PHONY: test test-db db-up db-down lint worker research demo migrate migration stamp seed \
         review review-next
 
 # Skips the tests that need PostgreSQL or MinIO.
@@ -24,6 +24,13 @@ db-down:
 # silently a no-op.
 migrate: db-up
 	uv run alembic upgrade head
+
+# The other half of migrate. Predicates and identifier namespaces are data, not
+# schema, so adding one needs no migration — but it does need this, or the spec
+# exists in code and not in the database and the first claim against it fails on
+# a foreign key. Idempotent; run it after every pull that touches PREDICATE_SPECS.
+seed: db-up
+	uv run python -m predictelection.seed
 
 # Adopt Alembic on a database that predates it — one built by create_all, which
 # already has every table the baseline would create. Records the revision

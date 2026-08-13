@@ -408,7 +408,7 @@ def test_a_verdict_on_an_unqueued_reading_must_say_why(session: Session) -> None
 def _org(session: Session, name: str) -> Entity:
     """An organization with its name recorded as an alias, as ingestion leaves it.
 
-    The alias is not decoration: `pollster_lookalikes` matches on the alias
+    The alias is not decoration: `find_lookalikes` matches on the alias
     index, so an entity without one is invisible to the merge-candidate lookup.
     """
 

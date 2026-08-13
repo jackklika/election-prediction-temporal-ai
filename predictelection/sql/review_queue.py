@@ -12,7 +12,7 @@ Two ideas shape the design:
   pollster 'UC Berkeley' resembles existing: 'UC Berkeley IGS'" is useless
   without the poll it came from and the entity ids either name resolves to. So
   reading a task loads its target, and for a pollster concern it re-runs the same
-  lookalike query that filed it — `pollster_lookalikes`, not a second copy.
+  lookalike query that filed it — `find_lookalikes`, not a second copy.
 - **Deciding is append-only, and the fix is separate from the verdict.** The
   decision records what a human concluded; a merge additionally writes an
   `EntityRedirect`. Both happen in the caller's transaction, so a CLI that dies
@@ -39,8 +39,10 @@ from predictelection.sql.entity import (
     Entity,
     EntityKind,
     EntityRedirect,
+    normalize_slug,
     resolve_entity,
 )
+from predictelection.sql.lookup import find_lookalikes
 from predictelection.sql.polling import (
     Poll,
     PollEstimate,
@@ -402,7 +404,7 @@ def _target(session: Session, task: ReviewTask) -> ReviewTarget:
 def _poll_revision_target(session: Session, revision_id: uuid.UUID) -> ReviewTarget:
     """A poll revision with the pollster a merge would move.
 
-    The lookalikes come from `pollster_lookalikes`, the same query that filed the
+    The lookalikes come from `find_lookalikes`, the same query that filed the
     task. Re-derived rather than stored because the answer changes as the graph
     does: an organization created after the task was filed is a legitimate merge
     target for it, and a stored list would never mention it.
@@ -459,18 +461,18 @@ def _merge_candidates(
 ) -> tuple[MergeCandidate, ...]:
     """Organizations this pollster might be a duplicate of.
 
-    Imported lazily: `research.polls` imports from `sql`, so reaching for it at
-    module scope would close a cycle. The alternative — a second trigram query
-    here — is the thing this is deliberately avoiding.
+    The same `find_lookalikes` call the ingestor made when it filed the task, at
+    the same threshold. Two copies of the query would let the reviewer be offered
+    a candidate the ingestor never considered — the diagnosis and the fix
+    disagreeing about the same graph.
     """
-
-    from predictelection.research.contests import normalize_slug
-    from predictelection.research.polls import pollster_lookalikes
 
     slug = normalize_slug(name)
     seen: set[uuid.UUID] = {exclude} if exclude else set()
     candidates: list[MergeCandidate] = []
-    for entity_id, alias in pollster_lookalikes(session, slug):
+    for entity_id, alias in find_lookalikes(
+        session, slug, kind=EntityKind.ORGANIZATION
+    ):
         canonical_id = resolve_entity(session, entity_id)
         if canonical_id in seen:
             continue

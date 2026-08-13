@@ -39,7 +39,17 @@ from dataclasses import dataclass
 import datetime as dt
 import re
 
-from predictelection.sql import ContestStage, PoliticalEventKind, TimePrecision
+# `normalize_slug` is imported rather than defined here. It moved down to
+# `sql.entity`, beside `normalize_entity_name`, when the review queue needed it:
+# `sql` is the bottom layer, and a reader there reaching up into `research` for a
+# string function closed an import cycle. Re-exported so callers that think of it
+# as "the thing that builds contest keys" can still get it from here.
+from predictelection.sql import (
+    ContestStage,
+    PoliticalEventKind,
+    TimePrecision,
+    normalize_slug,
+)
 
 
 CONTEST_KEY_NAMESPACE = "contest-key"
@@ -67,20 +77,6 @@ EARLIEST_CYCLE = 1788
 error somewhere upstream, not a contest."""
 
 LATEST_CYCLE = 2200
-
-
-def normalize_slug(value: str) -> str:
-    """Free text to a key segment: "US Senate" -> "us-senate".
-
-    Offices and parties are slugs rather than enums because the set is open —
-    state offices, ballot measures and party names vary by state, and an enum
-    would force every new one through a schema change.
-    """
-
-    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-    if not slug:
-        raise ValueError(f"{value!r} has no usable characters")
-    return slug
 
 
 @dataclass(frozen=True, slots=True)

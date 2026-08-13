@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import re
 import unicodedata
 import uuid
 
@@ -44,6 +45,28 @@ def normalize_entity_name(name: str) -> str:
     if not normalized:
         raise ValueError("entity names must contain more than whitespace")
     return normalized
+
+
+def normalize_slug(value: str) -> str:
+    """Free text to a key segment: "US Senate" -> "us-senate".
+
+    Lives here, beside `normalize_entity_name`, because both answer the same
+    question — what is the stable key for this string — and both are used on the
+    read path as well as the write one. Offices, parties and pollsters are slugs
+    rather than enums because the set is open: state offices, ballot measures and
+    party names vary by state, and an enum would force every new one through a
+    schema change.
+
+    Stronger than `normalize_entity_name`, which folds only case and whitespace.
+    This also collapses punctuation, which is what makes "EPIC-MRA", "EPIC MRA"
+    and "EPIC/MRA" one key. That is too aggressive for an alias equality key and
+    exactly right for a derived identifier.
+    """
+
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not slug:
+        raise ValueError(f"{value!r} has no usable characters")
+    return slug
 
 
 def normalize_identifier_namespace(namespace: str) -> str:

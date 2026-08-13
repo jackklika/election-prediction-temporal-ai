@@ -18,6 +18,7 @@ from predictelection.sql.entity import (
     new_entity_alias,
     normalize_entity_name,
     normalize_identifier_namespace,
+    normalize_slug,
     resolve_entity,
 )
 from predictelection.sql.provenance import (
@@ -139,8 +140,11 @@ from predictelection.sql.ingest import (
 from predictelection.sql.lookup import (
     EntityMatch,
     EntityMatches,
+    LOOKALIKE_LIMIT,
+    SIMILARITY_FLOOR,
     find_entities,
     find_events,
+    find_lookalikes,
 )
 from predictelection.sql.review_queue import (
     MergeCandidate,
@@ -205,6 +209,7 @@ __all__ = [
     "IdentifierNamespace",
     "Immutable",
     "JsonEvidenceLocator",
+    "LOOKALIKE_LIMIT",
     "MergeCandidate",
     "NAMESPACE_SPECS",
     "NamespaceSpec",
@@ -249,6 +254,7 @@ __all__ = [
     "ReviewTaskStatus",
     "ReviewTaskView",
     "ReviewerKind",
+    "SIMILARITY_FLOOR",
     "Source",
     "SourceKind",
     "SourceSnapshot",
@@ -277,6 +283,7 @@ __all__ = [
     "find_entity_redirect_chains",
     "find_entity_redirect_cycle",
     "find_events",
+    "find_lookalikes",
     "find_poll_average_revision_supersession_cycle",
     "find_poll_revision_supersession_cycle",
     "find_task",
@@ -300,6 +307,7 @@ __all__ = [
     "normalize_entity_name",
     "normalize_evidence_locator",
     "normalize_identifier_namespace",
+    "normalize_slug",
     "ontology_alignment_score",
     "pending_tasks",
     "record_claim_from_source",

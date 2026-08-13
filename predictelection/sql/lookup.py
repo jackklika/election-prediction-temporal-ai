@@ -47,6 +47,21 @@ from predictelection.sql.predicate import PoliticalEventKind, get_predicate_spec
 
 DEFAULT_LIMIT = 20
 
+SIMILARITY_FLOOR = 0.55
+"""Trigram similarity above which two names are worth a second look.
+
+Low deliberately: every caller feeds this into a review task rather than a
+merge, so a false positive costs a reviewer seconds while a false negative is a
+silent fork nobody ever sees.
+
+Here rather than in the domain that first needed it (pollsters) because the
+review queue reads it too, and a second copy of the threshold would let the
+reviewer be offered a different candidate set than the one the ingestor judged.
+"""
+
+LOOKALIKE_LIMIT = 5
+"""Candidates offered per unmatched name — a queue entry, not a report."""
+
 
 @dataclass(frozen=True, slots=True)
 class EntityMatch:
@@ -187,6 +202,41 @@ def find_events(
         nulls_last(occurred_at.desc()), Entity.canonical_name
     )
     return _materialize(session, statement, limit=limit)
+
+
+def find_lookalikes(
+    session: Session,
+    slug: str,
+    *,
+    kind: EntityKind,
+    floor: float = SIMILARITY_FLOOR,
+    limit: int = LOOKALIKE_LIMIT,
+) -> tuple[tuple[uuid.UUID, str], ...]:
+    """Entities whose alias key is close to this slug, closest first.
+
+    Trigram similarity over the alias index, which `ix_entity_alias_normalized_trgm`
+    exists to serve. Deliberately returns candidates and nothing else: the caller
+    decides whether a near miss means "merge", "ask a human", or "ignore", and
+    those three answers differ by domain.
+
+    Both a write-path and a read-path concern, which is why it lives here rather
+    than beside either. Ingestion calls it to decide whether to file a review
+    task; review calls it to offer the reviewer merge targets. Two copies of this
+    query would let a reviewer be offered candidates the ingestor never
+    considered — the fix and the diagnosis disagreeing about the same graph.
+    """
+
+    similarity = func.similarity(EntityAlias.normalized_name, slug)
+    return tuple(
+        (entity_id, alias)
+        for entity_id, alias in session.execute(
+            select(EntityAlias.entity_id, EntityAlias.name)
+            .join(Entity, Entity.id == EntityAlias.entity_id)
+            .where(Entity.kind == kind, similarity >= floor)
+            .order_by(similarity.desc())
+            .limit(limit)
+        )
+    )
 
 
 # --------------------------------------------------------------------------
