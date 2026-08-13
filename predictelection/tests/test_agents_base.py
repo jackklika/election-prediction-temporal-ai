@@ -17,6 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from predictelection.agents.base import (
+    AGENT_MAX_TOKENS,
     DEFAULT_EFFORT,
     SHARED_INSTRUCTIONS,
     build_research_agent,
@@ -144,3 +145,18 @@ def test_the_debates_agent_runs_above_the_project_default() -> None:
 
     assert debates.EFFORT == "high"
     assert debates.EFFORT != DEFAULT_EFFORT
+
+
+def test_max_tokens_is_set_well_above_the_library_default() -> None:
+    """pydantic-ai defaults max_tokens to 4096, which truncates silently.
+
+    Thinking counts against this budget on Sonnet 5, so `effort="high"` can spend
+    it before any answer is written — and a findings model whose lists default to
+    `()` turns the truncated response into a clean "found nothing". Two live
+    candidacy runs died this way with `finish_reason: length`.
+    """
+
+    agent = _build()
+    assert agent.model_settings is not None
+    assert agent.model_settings["max_tokens"] == AGENT_MAX_TOKENS
+    assert AGENT_MAX_TOKENS >= 32_000  # 4096 is the default this exists to beat

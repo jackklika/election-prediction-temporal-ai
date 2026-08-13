@@ -81,6 +81,27 @@ Raise it per agent for a genuinely harder domain rather than globally, and note
 that `xhigh` is rejected outright by models that do not support it.
 """
 
+AGENT_MAX_TOKENS = 32_000
+"""Output ceiling per model request. **Do not leave this unset.**
+
+pydantic-ai defaults it to 4096, and on this model that is a silent data-loss
+bug rather than a cost control. Two things make it one:
+
+- Thinking is on by default on Sonnet 5 and counts against this same budget, so
+  `effort="high"` spends the ceiling before any answer is written.
+- A findings model whose list fields default to `()` turns a truncated response
+  into a valid empty one, so the failure arrives as "found nothing".
+
+Both bit at once. The candidacy agent's first two live runs ended with
+`finish_reason: length` at 4,096 and 19,010 output tokens, and the second was
+reported as a clean run that found zero candidates. The Logfire trace was the
+only place the truncation was visible.
+
+32k is roughly a full field of candidates with stints and endorsements plus
+thinking, well inside Sonnet 5's 128k output limit. Raise it rather than lower
+`effort` if a domain needs more room.
+"""
+
 AGENT_TIMEOUT = timedelta(minutes=20)
 """How long one model request may take before Temporal calls it dead.
 
@@ -160,7 +181,8 @@ def build_research_agent(
         # with a non-Anthropic model, so a stubbed FunctionModel ignores this
         # rather than choking on it.
         model_settings=AnthropicModelSettings(
-            anthropic_effort=effort or DEFAULT_EFFORT
+            anthropic_effort=effort or DEFAULT_EFFORT,
+            max_tokens=AGENT_MAX_TOKENS,
         ),
         capabilities=[
             TemporalDurability(
