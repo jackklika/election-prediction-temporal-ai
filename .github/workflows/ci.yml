@@ -9,13 +9,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  # todo: set a default value in code or something
+  ANTHROPIC_API_KEY: ci-does-not-call-anthropic
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.0
         with:
           enable-cache: true
       - run: uv sync --locked
@@ -26,7 +30,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.0
         with:
           enable-cache: true
       - run: uv sync --locked
