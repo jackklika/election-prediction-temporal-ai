@@ -15,6 +15,7 @@ from typing import Final
 RESEARCH_WORKFLOWS: Final[dict[str, str]] = {
     "debates": "ResearchDebatesWorkflow",
     "structure": "ResearchStructureWorkflow",
+    "candidacies": "ResearchCandidaciesWorkflow",
 }
 """CLI name to workflow name. Add a research domain here and it is triggerable."""
 

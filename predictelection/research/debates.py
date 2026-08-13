@@ -16,7 +16,6 @@ Precision is explicit rather than assumed: an agent that only read "September
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal
 import uuid
 
@@ -36,7 +35,11 @@ from predictelection.sql import (
 )
 from predictelection.research.contests import EVENT_KEY_NAMESPACE, EventKey
 from predictelection.research.ingestion import Ingestion, IngestContext
-from predictelection.research.scraped import ScrapedEntity, ScrapedRecord
+from predictelection.research.scraped import (
+    ScrapedDateTime,
+    ScrapedEntity,
+    ScrapedRecord,
+)
 
 
 class ScrapedDebate(ScrapedRecord):
@@ -52,7 +55,9 @@ class ScrapedDebate(ScrapedRecord):
     title: str = Field(
         min_length=1, max_length=500, description="Formal name or title of the debate."
     )
-    starts_at: datetime = Field(description="When the debate began, with a timezone.")
+    starts_at: ScrapedDateTime = Field(
+        description="When the debate began. A timezone if the source gave one."
+    )
     starts_at_precision: TimePrecision = Field(
         default=TimePrecision.DAY,
         description=(
@@ -61,7 +66,7 @@ class ScrapedDebate(ScrapedRecord):
             "precision than the source did."
         ),
     )
-    ends_at: datetime | None = Field(
+    ends_at: ScrapedDateTime | None = Field(
         default=None, description="When it ended, if the source says."
     )
     status: EventOccurrenceStatus = Field(

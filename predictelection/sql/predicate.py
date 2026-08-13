@@ -134,8 +134,15 @@ class ContestResultValue(PredicateValue):
     votes: int | None = Field(default=None, ge=0)
     share: CanonicalDecimal | None = Field(default=None, ge=0, le=100)
     place: int | None = Field(default=None, ge=1)
-    won: bool = False
-    """Explicit rather than derived from place: multi-winner contests exist."""
+    won: bool | None = None
+    """Explicit rather than derived from place: multi-winner contests exist.
+
+    Nullable because a results table states counts and not outcomes, and `False`
+    would assert something no source said. Defaulting it to False gave two
+    honest writers a contradiction: a vote-count claim silently said "did not
+    win" while an outcome claim said "won", and neither superseded the other.
+    None means the source stated no outcome; a writer that knows one says so.
+    """
 
 
 class AssessmentValue(PredicateValue):

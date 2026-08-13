@@ -10,14 +10,14 @@ claim model already speaks time:
   interval. In → out → in is two claims, both true forever over their windows.
   A withdrawal is never a deletion; the graph must still answer "who was
   running in June".
-- "Won" is a `contest_result` claim with value `{won: true}` — asserted only
-  when the source states an outcome, never inferred from vote totals, which is
-  the roadmap's rule (multi-winner contests exist) and also this race's lesson:
-  Rodriguez *withdrew* and still out-polled candidates who stayed in.
-- Vote counts are deliberately absent here. They come from the results
-  *importer*, deterministically; an agent asserting numbers is the one thing
-  the pipeline forbids. The two writers' claims meet on the same contest and
-  person entities via derived keys.
+- **Nothing here writes `contest_result`.** Counts *and* the outcome come from
+  the results importer, which reads both from the same page deterministically —
+  the table for votes, the "Nominee" heading for `won`. Two writers of one
+  predicate is how a graph acquires contradictions: an outcome claim saying
+  "won" beside a count claim whose `won` defaulted to False.
+- `outcome` is therefore not a claim. It earns its place by validating the
+  stints — a withdrawal implies the last stint ended — and by telling review
+  what the page called this candidacy.
 
 Dates carry their stated precision, and an unknown date is an open interval
 end, not an invented day.
@@ -33,7 +33,12 @@ from pydantic import Field, model_validator
 
 from predictelection.research.contests import ContestKey
 from predictelection.research.ingestion import Ingestion, IngestContext
-from predictelection.research.scraped import ScrapedEntity, ScrapedModel, ScrapedRecord
+from predictelection.research.scraped import (
+    ScrapedDateTime,
+    ScrapedEntity,
+    ScrapedModel,
+    ScrapedRecord,
+)
 from predictelection.sql import (
     ContestStage,
     EntityKind,
@@ -46,7 +51,8 @@ class CandidacyOutcome(StrEnum):
     """How the candidacy ended, as the source states it."""
 
     NOMINATED = "nominated"
-    """Won this contest. The only outcome that asserts a contest_result."""
+    """Won this contest. Recorded as `contest_result.won` by the results
+    importer, which reads the same page's Nominee heading — not from here."""
 
     ELIMINATED = "eliminated"
     """Stood through the vote and lost."""
@@ -68,7 +74,7 @@ class CandidacyStint(ScrapedModel):
     assert they were running while they were endorsing someone else.
     """
 
-    entered_on: datetime | None = Field(
+    entered_on: ScrapedDateTime | None = Field(
         default=None,
         description=(
             "When this stint began — announcement or re-entry. Null when the "
@@ -79,7 +85,7 @@ class CandidacyStint(ScrapedModel):
         default=TimePrecision.DAY,
         description="How precisely the source gave the entry date.",
     )
-    left_on: datetime | None = Field(
+    left_on: ScrapedDateTime | None = Field(
         default=None,
         description=(
             "When this stint ended — withdrawal. Null when it ran to the "
@@ -156,12 +162,28 @@ class ScrapedCandidacy(ScrapedRecord):
     )
 
     @model_validator(mode="after")
-    def _withdrew_means_an_exit(self):
-        if self.outcome is CandidacyOutcome.WITHDREW and self.stints[-1].left_on is None:
-            # Tolerated, not rejected: the source may state the withdrawal
-            # without dating it. The interval stays open and the outcome still
-            # records what happened.
-            pass
+    def _stints_do_not_overlap(self):
+        """Stints are consecutive periods, so they must not overlap.
+
+        Overlapping stints would assert someone was simultaneously in the race
+        twice, which usually means a re-entry was reported with the *original*
+        announcement date instead of the re-entry date. Undated stints are
+        skipped rather than rejected — a source that does not date a withdrawal
+        is normal, and refusing it would lose the candidacy entirely.
+        """
+
+        previous_exit: datetime | None = None
+        for stint in self.stints:
+            if (
+                previous_exit is not None
+                and stint.entered_on is not None
+                and stint.entered_on < previous_exit
+            ):
+                raise ValueError(
+                    f"stint starting {stint.entered_on.date()} overlaps the "
+                    f"previous one, which ended {previous_exit.date()}"
+                )
+            previous_exit = stint.left_on or previous_exit
         return self
 
 
@@ -191,21 +213,6 @@ def ingest_candidacy(record: ScrapedCandidacy, context: IngestContext) -> Ingest
         )
         for stint in record.stints
     ]
-
-    if record.outcome is CandidacyOutcome.NOMINATED:
-        # The one outcome that is a result. Votes and shares are not asserted
-        # here — the results importer owns numbers — so this claim and the
-        # imported vote counts are separate propositions that meet on the same
-        # entities, each citing its own evidence.
-        recorded.append(
-            context.record(
-                "contest_result",
-                subject_id=person.entity_id,
-                object_id=contest.entity_id,
-                value={"won": True},
-                excerpt=record.candidate.name,
-            )
-        )
 
     return Ingestion(
         subject_entity_id=person.entity_id,

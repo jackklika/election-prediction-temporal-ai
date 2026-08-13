@@ -77,18 +77,36 @@ class SectionTable:
     """Rows of cell text, rowspan/colspan already expanded."""
 
 
-class _PageWalker(HTMLParser):
-    """One pass over the page: heading context plus expanded table grids.
+@dataclass
+class SectionItem:
+    """One list item and the headings it sits under.
 
-    Stream-oriented because the page is 1.7 MB and only the tables matter.
+    Candidate rosters are prose lists, not tables: "Nominee", "Withdrawn" and
+    "Eliminated in primary" are `h4`s over `<ul>`s. The results importer reads
+    the Nominee list to learn who won, which is the only way `contest_result`
+    can carry an outcome the source actually stated.
+    """
+
+    h2: str
+    h3: str
+    h4: str
+    text: str
+
+
+class _PageWalker(HTMLParser):
+    """One pass over the page: heading context, table grids, and list items.
+
+    Stream-oriented because the page is 1.7 MB and only a little of it matters.
     Nested tables mark the outer one malformed rather than corrupting its grid.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.tables: list[SectionTable] = []
+        self.items: list[SectionItem] = []
         self._h2 = ""
         self._h3 = ""
+        self._h4 = ""
         self._heading_level: str | None = None
         self._heading_text: list[str] = []
         self._table_depth = 0
@@ -98,6 +116,7 @@ class _PageWalker(HTMLParser):
         self._column = 0
         self._cell_text: list[str] | None = None
         self._cell_span: tuple[int, int] = (1, 1)
+        self._item_text: list[str] | None = None
         self._skip_depth = 0
 
     # -- headings ----------------------------------------------------------
@@ -118,13 +137,19 @@ class _PageWalker(HTMLParser):
             # must read "margin of error" or header recognition silently fails.
             if self._cell_text is not None:
                 self._cell_text.append(" ")
+            elif self._item_text is not None:
+                self._item_text.append(" ")
             elif self._heading_level is not None:
                 self._heading_text.append(" ")
             return
 
-        if tag in ("h2", "h3"):
+        if tag in ("h2", "h3", "h4"):
             self._heading_level = tag
             self._heading_text = []
+        elif tag == "li" and self._table_depth == 0:
+            # Only outside tables: a list inside a cell is cell text, not a
+            # roster entry.
+            self._item_text = []
         elif tag == "table":
             self._table_depth += 1
             if self._table_depth == 1:
@@ -148,13 +173,24 @@ class _PageWalker(HTMLParser):
         if self._skip_depth:
             self._skip_depth -= 1
             return
-        if tag in ("h2", "h3") and self._heading_level == tag:
+        if tag in ("h2", "h3", "h4") and self._heading_level == tag:
             text = " ".join("".join(self._heading_text).split())
+            # A heading resets everything below it, so "Nominee" cannot leak
+            # from one party's primary into the next section's lists.
             if tag == "h2":
-                self._h2, self._h3 = text, ""
+                self._h2, self._h3, self._h4 = text, "", ""
+            elif tag == "h3":
+                self._h3, self._h4 = text, ""
             else:
-                self._h3 = text
+                self._h4 = text
             self._heading_level = None
+        elif tag == "li" and self._item_text is not None:
+            text = " ".join("".join(self._item_text).split())
+            if text:
+                self.items.append(
+                    SectionItem(h2=self._h2, h3=self._h3, h4=self._h4, text=text)
+                )
+            self._item_text = None
         elif tag in ("td", "th") and self._cell_text is not None:
             text = " ".join("".join(self._cell_text).split())
             rows, cols = self._cell_span
@@ -176,6 +212,8 @@ class _PageWalker(HTMLParser):
             self._heading_text.append(data)
         elif self._cell_text is not None:
             self._cell_text.append(data)
+        elif self._item_text is not None:
+            self._item_text.append(data)
 
     def _as_rows(self) -> list[list[str]]:
         rows = max(r for r, _ in self._grid) + 1

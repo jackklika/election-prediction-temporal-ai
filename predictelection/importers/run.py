@@ -37,12 +37,20 @@ def _build(args: argparse.Namespace) -> Importer:
         return OcdImporter()
     if args.importer == "fec":
         return FecCandidateImporter(cycle=args.cycle)
+    if args.importer == "wikipedia-results":
+        from predictelection.importers.wikipedia_results import WikipediaResultsImporter
+
+        _require(args, "wikipedia-results")
+        return WikipediaResultsImporter(
+            url=args.url,
+            division=args.division,
+            office=args.office,
+            cycle=args.cycle,
+        )
     if args.importer == "wikipedia-polls":
         from predictelection.importers.wikipedia_polls import WikipediaPollsImporter
 
-        for required in ("url", "division", "office"):
-            if not getattr(args, required):
-                raise SystemExit(f"wikipedia-polls requires --{required}")
+        _require(args, "wikipedia-polls")
         normalizer = None
         if args.normalize:
             from predictelection.importers.normalize import AnthropicCellNormalizer
@@ -58,9 +66,20 @@ def _build(args: argparse.Namespace) -> Importer:
     raise ValueError(args.importer)
 
 
+def _require(args: argparse.Namespace, importer: str) -> None:
+    """Both Wikipedia importers need the race coordinates the page cannot state."""
+
+    for required in ("url", "division", "office"):
+        if not getattr(args, required):
+            raise SystemExit(f"{importer} requires --{required}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("importer", choices=["ocd", "fec", "wikipedia-polls"])
+    parser.add_argument(
+        "importer",
+        choices=["ocd", "fec", "wikipedia-polls", "wikipedia-results"],
+    )
     parser.add_argument(
         "--cycle",
         type=int,

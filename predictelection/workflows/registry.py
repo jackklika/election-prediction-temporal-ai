@@ -14,12 +14,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from predictelection.workflows.candidacies import ResearchCandidaciesWorkflow
 from predictelection.workflows.debates import ResearchDebatesWorkflow
 from predictelection.workflows.names import RESEARCH_WORKFLOWS
 from predictelection.workflows.structure import ResearchStructureWorkflow
 
 
-WORKFLOWS: Sequence[Any] = (ResearchDebatesWorkflow, ResearchStructureWorkflow)
+WORKFLOWS: Sequence[Any] = (
+    ResearchDebatesWorkflow,
+    ResearchStructureWorkflow,
+    ResearchCandidaciesWorkflow,
+)
 
 # The CLI dispatches by name and the worker by class; a name the worker does not
 # register is a run that would sit in the queue forever, so tie them together.

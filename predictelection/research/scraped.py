@@ -12,12 +12,44 @@ quietly omit one.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from datetime import UTC, datetime
+from typing import Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from predictelection.research.contests import CONTEST_KEY_PATTERN
 from predictelection.sql import EntityKind, EntityMention, ExternalIdentifier
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive datetime rather than rejecting it.
+
+    Every timestamp column in this schema is timezone-aware, and a naive value
+    reaches the database as `valid_from must be timezone-aware` — which is what
+    happened on the first live candidacy run: the agent reported a withdrawal
+    as "2026-07-06T00:00:00" and the whole workflow failed on it.
+
+    Asking harder in the field description is not a fix. Models omit offsets on
+    *dates* because a date has no offset to state, and for "withdrew on 6 July"
+    there genuinely is none — so demanding one invites an invented offset, which
+    is worse than assuming the one the rest of the schema uses.
+
+    This is not the "false midnight" the data-model roadmap warns about. That
+    warning is about *precision*, and precision is carried separately in the
+    `*_precision` fields: a day-precision claim says outright that its time
+    component is not meaningful. Attaching UTC adds no information the source
+    did not give; it only picks the calendar the storage layer already assumes.
+    """
+
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+ScrapedDateTime = Annotated[datetime, AfterValidator(_as_utc)]
+"""A moment an agent reported, normalized to an aware datetime.
+
+Use this rather than a bare `datetime` in any record an agent fills in. Pair it
+with a `TimePrecision` field whenever the source may have been vague.
+"""
 
 
 class ScrapedModel(BaseModel):

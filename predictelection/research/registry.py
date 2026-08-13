@@ -29,7 +29,12 @@ from typing import Annotated, Any, get_args
 
 from pydantic import Field
 
+from predictelection.research.candidacies import ScrapedCandidacy, ingest_candidacy
 from predictelection.research.debates import ScrapedDebate, ingest_debate
+from predictelection.research.endorsements import (
+    ScrapedEndorsement,
+    ingest_endorsement,
+)
 from predictelection.research.ingestion import Ingestion, IngestContext
 from predictelection.research.polls import ScrapedPoll, ingest_poll
 from predictelection.research.scraped import ScrapedRecord
@@ -40,7 +45,11 @@ from predictelection.research.structure import (
 
 
 ScrapedPayload = Annotated[
-    ScrapedDebate | ScrapedRaceStructure | ScrapedPoll,
+    ScrapedDebate
+    | ScrapedRaceStructure
+    | ScrapedPoll
+    | ScrapedCandidacy
+    | ScrapedEndorsement,
     Field(discriminator="record_type"),
 ]
 """Every record shape an activity may be handed.
@@ -58,6 +67,8 @@ INGESTORS: dict[type[ScrapedRecord], Ingestor] = {
     ScrapedDebate: ingest_debate,
     ScrapedRaceStructure: ingest_race_structure,
     ScrapedPoll: ingest_poll,
+    ScrapedCandidacy: ingest_candidacy,
+    ScrapedEndorsement: ingest_endorsement,
 }
 
 
