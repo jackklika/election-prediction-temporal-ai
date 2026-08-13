@@ -18,20 +18,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import logging
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from predictelection.query.claims import ClaimRow, EntityRef, claims_with
-from predictelection.sql.entity import Entity, EntityIdentifier, resolve_entity
+from predictelection.query.entities import entity
+
+# `query` reading `research` is the one edge here worth justifying. It is
+# acyclic — `research` never imports `query` — and the alternative is a second
+# copy of the key grammar, which is exactly the duplication that put
+# `find_lookalikes` in `sql` earlier today. `ContestKey` is derived identity and
+# would sit more naturally in `sql`, alongside `normalize_slug`; it lives in
+# `research` with four sibling key types, and splitting one out of a cohesive
+# module was not worth it for this.
+from predictelection.research.contests import CONTEST_KEY_NAMESPACE, ContestKey
 from predictelection.sql.base import TimePrecision
+from predictelection.sql.entity import EntityIdentifier, resolve_entity
+from predictelection.sql.predicate import ContestResultValue, ContestStage
 
 
-CONTEST_KEY_NAMESPACE = "contest-key"
-"""Matches `research.contests.CONTEST_KEY_NAMESPACE`, restated rather than
-imported: `query` sits beside `research`, not above it, and the string is the
-stable part of that contract."""
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +82,125 @@ class ContestResultRow:
     won: bool | None
     """None means the source stated no outcome — not that they lost. A results
     table states counts; only a "Nominee" heading or a call states a winner."""
+
+
+@dataclass(frozen=True, slots=True)
+class ContestDetail:
+    """What a race *is* — the header a timeline page needs above the timeline.
+
+    Read from the contest key rather than from claims, and that is the point.
+    `contest_stage`, `contest_party`, `contest_for_office` and
+    `contest_in_jurisdiction` are all seeded predicates with writers, and on this
+    database every one of them has **zero** claims because the structure agent
+    has not been re-run. Asking claims what a contest is therefore answers
+    "nothing" for every contest in the graph.
+
+    The key already carries all of it — division, office, cycle, stage, party —
+    because it was designed so an importer and an agent could derive the same
+    identity independently. Parsing it back turns identity into description for
+    free, needs no agent run, and cannot disagree with the entity it names.
+
+    Claims would still add what the key cannot say: the election date, the
+    office's formal title, whether a runoff happened. When they exist, they
+    refine this rather than replace it.
+    """
+
+    contest: EntityRef
+    key: str
+    division: str
+    office: str
+    cycle: int
+    stage: ContestStage
+    party: str | None = None
+    jurisdiction: EntityRef | None = None
+    """The division as an entity, when one is recorded under that OCD id — which
+    is how a race links to the 47k jurisdictions and, eventually, to a polygon."""
+
+    @property
+    def label(self) -> str:
+        return self.contest.name
+
+
+def contest_detail(session: Session, contest_id: uuid.UUID) -> ContestDetail | None:
+    """One contest described from its key, or None if it has no key.
+
+    A contest with no `contest-key` identifier is one minted by name alone —
+    possible, and worth returning None for rather than guessing, because every
+    field here would otherwise be an invention.
+    """
+
+    contest = entity(session, contest_id)
+    if contest is None:
+        return None
+
+    raw = session.scalar(
+        select(EntityIdentifier.value).where(
+            EntityIdentifier.entity_id == contest.entity_id,
+            EntityIdentifier.namespace == CONTEST_KEY_NAMESPACE,
+        )
+    )
+    if raw is None:
+        return None
+    return _detail(session, contest, raw)
+
+
+def contests_in(
+    session: Session,
+    division_prefix: str,
+    *,
+    cycle: int | None = None,
+    office: str | None = None,
+    stage: ContestStage | None = None,
+    limit: int = 200,
+) -> tuple[ContestDetail, ...]:
+    """Every contest under a division prefix — the race browser's list.
+
+    Prefix matching on the key is what the key's shape was for: it begins with
+    the OCD division, and OCD divisions nest, so
+    `ocd-division/country:us/state:wi` selects Wisconsin's statewide races and
+    every congressional district within it in one comparison.
+
+    Filtering happens in Python after parsing rather than as more SQL `LIKE`s.
+    The key's segments are ordered division/office/cycle/stage/party, so
+    narrowing by cycle alone is not a prefix and would need a pattern with a
+    wildcard in the middle — which no index helps with anyway. Parsing a few
+    thousand keys is cheap and it cannot drift from `ContestKey`'s own grammar.
+
+    Note this is a scan today: `uq_entity_identifier_value` is a plain btree, so
+    a `LIKE 'prefix%'` cannot use it under a non-C collation. At 6,089 contest
+    keys that is irrelevant. At a million it would want `text_pattern_ops`.
+    """
+
+    normalized = division_prefix.strip().lower()
+    rows = session.execute(
+        select(EntityIdentifier.entity_id, EntityIdentifier.value)
+        .where(
+            EntityIdentifier.namespace == CONTEST_KEY_NAMESPACE,
+            EntityIdentifier.value.startswith(normalized),
+        )
+        .order_by(EntityIdentifier.value)
+    ).all()
+
+    found: list[ContestDetail] = []
+    for entity_id, raw in rows:
+        try:
+            key = ContestKey.parse(raw)
+        except ValueError:
+            # A malformed key is a data problem, not a reason to fail a browse.
+            logger.warning("skipping unparseable contest key %r", raw)
+            continue
+        if cycle is not None and key.cycle != cycle:
+            continue
+        if office is not None and key.office != office:
+            continue
+        if stage is not None and key.stage is not stage:
+            continue
+        reference = entity(session, entity_id)
+        if reference is not None:
+            found.append(_detail(session, reference, raw, key=key))
+        if len(found) >= limit:
+            break
+    return tuple(found)
 
 
 def contest_by_key(session: Session, contest_key: str) -> uuid.UUID | None:
@@ -173,7 +301,9 @@ def winners_by_office(
     for row in claims_with(
         session, "contest_result", object_ids=list(office_of_contest), limit=limit
     ):
-        if row.object is None or not (row.value or {}).get("won"):
+        if row.object is None or not (
+            isinstance(row.value, ContestResultValue) and row.value.won
+        ):
             continue
         office = office_of_contest.get(row.object.entity_id)
         if office is not None:
@@ -185,26 +315,50 @@ def winners_by_office(
 
 
 def _result(row: ClaimRow) -> ContestResultRow:
-    value = row.value or {}
-    share = value.get("share")
+    """Narrowed on the predicate, which is the union's discriminator.
+
+    A `contest_result` claim whose payload is not a `ContestResultValue` is a
+    claim written against a contract it does not satisfy; the fields come back
+    empty rather than the row vanishing, so the contradiction stays visible.
+    """
+
+    value = row.value if isinstance(row.value, ContestResultValue) else None
     assert row.object is not None
     return ContestResultRow(
         claim_id=row.claim_id,
         candidate=row.subject,
         contest=row.object,
-        votes=value.get("votes"),
-        # Decimal, not float: these are published shares and adding rounding
-        # error to a number someone can check against a source is indefensible.
-        share=Decimal(str(share)) if share is not None else None,
-        place=value.get("place"),
-        won=value.get("won"),
+        votes=value.votes if value else None,
+        # Decimal all the way through: these are published shares, and adding
+        # rounding error to a number someone can check against a source is
+        # indefensible.
+        share=value.share if value else None,
+        place=value.place if value else None,
+        won=value.won if value else None,
     )
 
 
-def entity(session: Session, entity_id: uuid.UUID) -> EntityRef | None:
-    """One entity as a reference, for a caller holding only an id."""
-
-    found = session.get(Entity, resolve_entity(session, entity_id))
-    if found is None:
-        return None
-    return EntityRef(entity_id=found.id, kind=found.kind, name=found.canonical_name)
+def _detail(
+    session: Session,
+    contest: EntityRef,
+    raw: str,
+    *,
+    key: ContestKey | None = None,
+) -> ContestDetail:
+    parsed = key or ContestKey.parse(raw)
+    jurisdiction_id = session.scalar(
+        select(EntityIdentifier.entity_id).where(
+            EntityIdentifier.namespace == "ocd-division",
+            EntityIdentifier.value == parsed.division,
+        )
+    )
+    return ContestDetail(
+        contest=contest,
+        key=raw,
+        division=parsed.division,
+        office=parsed.office,
+        cycle=parsed.cycle,
+        stage=parsed.stage,
+        party=parsed.party,
+        jurisdiction=entity(session, jurisdiction_id) if jurisdiction_id else None,
+    )

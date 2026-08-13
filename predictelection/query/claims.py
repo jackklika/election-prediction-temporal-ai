@@ -23,17 +23,27 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any
 import uuid
 
+from pydantic import ValidationError
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from predictelection.sql.base import TimePrecision
 from predictelection.sql.claim import Claim, ClaimAssertion, EvidenceAnchor
 from predictelection.sql.entity import Entity, EntityKind
+from predictelection.sql.predicate import (
+    ClaimValue,
+    get_predicate_spec,
+    get_predicate_spec_by_id,
+    parse_claim_value,
+)
 from predictelection.sql.provenance import Source, SourceSnapshot
-from predictelection.sql.predicate import get_predicate_spec, get_predicate_spec_by_id
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_LIMIT = 100
@@ -78,9 +88,24 @@ class ClaimRow:
 
     claim_id: uuid.UUID
     predicate: str
+    """The discriminator for `value`. None of the payload models carries a type
+    tag and none can gain one — `build_claim_fingerprint` hashes the value, so a
+    tag would change the identity of every stored claim — so this field is how a
+    reader, or a TypeScript client, narrows the union."""
+
     subject: EntityRef
     object: EntityRef | None
-    value: dict[str, Any] | None
+    value: ClaimValue | None
+    """Parsed into the model its predicate declares, not a bare dict.
+
+    None both when the predicate takes no value and when a stored payload failed
+    to validate against its own contract; `raw_value` still holds the payload in
+    the second case, and the failure is logged rather than raised so one bad row
+    cannot fail a page."""
+
+    raw_value: dict[str, Any] | None = None
+    """The payload as stored. The escape hatch for a claim written under an
+    older version of its predicate's schema."""
 
     valid_at: datetime | None = None
     valid_at_precision: TimePrecision | None = None
@@ -212,10 +237,13 @@ def _rows(
     return tuple(
         ClaimRow(
             claim_id=claim.id,
-            predicate=get_predicate_spec_by_id(claim.predicate_version_id).slug,
+            predicate=(
+                slug := get_predicate_spec_by_id(claim.predicate_version_id).slug
+            ),
             subject=entities[claim.subject_id],
             object=entities.get(claim.object_id) if claim.object_id else None,
-            value=claim.value,
+            value=_value(slug, claim.value),
+            raw_value=claim.value,
             valid_at=claim.valid_at,
             valid_at_precision=claim.valid_at_precision,
             valid_from=claim.valid_from,
@@ -227,6 +255,23 @@ def _rows(
         )
         for claim in claims
     )
+
+
+def _value(slug: str, raw: dict[str, Any] | None) -> ClaimValue | None:
+    """Parse a payload, downgrading a contract violation to a warning.
+
+    A payload that does not satisfy its predicate's schema is a real problem —
+    `check_claim_ontology` exists to stop one being written — but discovering it
+    while rendering a page is the wrong moment to raise. The row still comes
+    back, with `raw_value` intact and `value` empty, so the damage is visible
+    rather than fatal.
+    """
+
+    try:
+        return parse_claim_value(slug, raw)
+    except ValidationError:
+        logger.warning("claim payload does not match the %s contract: %r", slug, raw)
+        return None
 
 
 def evidence_for(

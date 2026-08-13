@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, get_args
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -117,6 +117,56 @@ class ParticipationValue(PredicateValue):
 class EndorsementValue(PredicateValue):
     strength: EndorsementStrength = EndorsementStrength.FULL
     context: str | None = Field(default=None, max_length=500)
+
+
+class DonationKind(StrEnum):
+    """How the money reached the recipient.
+
+    The distinction is not cosmetic: an independent expenditure is legally *not*
+    a contribution to the candidate, cannot be coordinated with them, and is
+    uncapped. Collapsing the two would let a query for "who funded this campaign"
+    return a number no filing supports.
+    """
+
+    CONTRIBUTION = "contribution"
+    """Direct, to the candidate or their committee. Capped per donor."""
+
+    INDEPENDENT_EXPENDITURE = "independent_expenditure"
+    """Spent *about* the recipient by someone acting independently."""
+
+    IN_KIND = "in_kind"
+    """Goods or services rather than money."""
+
+    LOAN = "loan"
+    """Repayable, often a candidate funding their own campaign."""
+
+    OTHER = "other"
+
+
+class DonationValue(PredicateValue):
+    """One contribution, as a filing states it.
+
+    `amount` is CanonicalDecimal for the same reason a vote share is: Pydantic
+    serializes Decimal to a scale-preserving string, so $2500 and $2500.00 would
+    be one donation with two fingerprints and would not deduplicate.
+
+    Nullable amount because a source can report that money changed hands without
+    saying how much — "maxed out to the campaign" is a real sentence in real
+    coverage — and a zero would assert a number nobody published.
+    """
+
+    amount: CanonicalDecimal | None = Field(default=None, ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    kind: DonationKind = DonationKind.CONTRIBUTION
+    supporting: bool | None = None
+    """For an independent expenditure, whether it was spent for or against.
+
+    Meaningless for a direct contribution and left null there. Money spent
+    *against* a candidate is the case that breaks any model treating a donation
+    as support, and it is common enough that guessing would be wrong often.
+    """
+
+    purpose: str | None = Field(default=None, max_length=300)
 
 
 class ContestStageValue(PredicateValue):
@@ -433,6 +483,24 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         value_model=EndorsementValue,
     ),
     PredicateSpec(
+        slug="donated_to",
+        label="Donated to",
+        description=(
+            "The subject gave money supporting or opposing the object, in the "
+            "stated amount and form. Recorded as a claim about the *donor*, so "
+            "the same shape covers a person maxing out, a PAC bundling, and a "
+            "super PAC spending against someone."
+        ),
+        target_kind=PredicateTarget.QUALIFIED,
+        temporal_mode=TemporalMode.OPTIONAL,
+        subject_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION, EntityKind.PARTY),
+        # A recipient is a candidate or a committee. No new EntityKind: a
+        # committee is an organization, and minting a kind for it would mean a
+        # migration and an enum change for no query anyone has asked for.
+        object_kinds=(EntityKind.PERSON, EntityKind.ORGANIZATION, EntityKind.CONTEST),
+        value_model=DonationValue,
+    ),
+    PredicateSpec(
         slug="candidate_in",
         label="Candidate in",
         description="The subject was or is a candidate in the contest.",
@@ -616,6 +684,73 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         value_model=AssessmentValue,
     ),
 )
+
+ClaimValue = (
+    AssessmentValue
+    | ContestResultValue
+    | ContestStageValue
+    | DonationValue
+    | EndorsementValue
+    | EventKindValue
+    | EventOccurrenceValue
+    | ParticipationValue
+    | PublicStatementValue
+)
+"""Every payload a claim's `value` can hold.
+
+**The discriminator is the predicate slug, not a field.** None of these models
+carries a type tag and none may gain one: `build_claim_fingerprint` hashes the
+value, so adding a tag would change the identity of every claim already stored
+and orphan them from their own re-derivation. The slug lives beside the value on
+every read anyway, so nothing is lost — `parse_claim_value` dispatches on it,
+and a client narrowing this union does the same.
+
+That has one consequence worth stating for whatever consumes this over HTTP: a
+JSON schema generated from this alias alone is an untagged `anyOf`, which a
+TypeScript client cannot narrow by itself. Pair it with the predicate — a row
+type of `{predicate: "endorsed", value: EndorsementValue} | ...` narrows
+perfectly, and the union above is the raw material for building one.
+"""
+
+PREDICATE_VALUE_MODELS: dict[str, type[PredicateValue]] = {
+    spec.slug: spec.value_model
+    for spec in PREDICATE_SPECS
+    if spec.value_model is not None
+}
+"""Slug to payload model, for parsing a stored value back into its type."""
+
+if set(PREDICATE_VALUE_MODELS.values()) != set(get_args(ClaimValue)):
+    # The same tie the workflow registry keeps between names and classes: a
+    # value model reachable from a predicate but missing from the union would
+    # type-check as impossible while occurring in practice.
+    raise RuntimeError("ClaimValue and PREDICATE_VALUE_MODELS disagree")
+
+
+def parse_claim_value(slug: str, raw: Mapping[str, Any] | None) -> ClaimValue | None:
+    """A stored JSON payload as the model its predicate declares.
+
+    Dispatches on the slug rather than trying the union, deliberately. Several
+    payloads are a single enum field and would validate against each other, so
+    union inference would silently pick the wrong type — `EventKindValue` and
+    `ContestStageValue` are one field apart. Asking the predicate what shape it
+    promised removes the guess entirely.
+
+    Returns None for a predicate that takes no value, and raises for a payload
+    that does not match its own contract — that is a claim written against a
+    schema it does not satisfy, which `check_claim_ontology` exists to prevent
+    and a reader should not paper over.
+    """
+
+    model = PREDICATE_VALUE_MODELS.get(slug)
+    if model is None or raw is None:
+        return None
+    parsed = model.model_validate(raw)
+    # Narrowed rather than declared: every member of PREDICATE_VALUE_MODELS is a
+    # member of ClaimValue — the check above this function keeps that true — but
+    # a dict of `type[PredicateValue]` cannot say so to a type checker.
+    assert isinstance(parsed, get_args(ClaimValue))
+    return parsed
+
 
 _PREDICATE_SPECS_BY_KEY = {(spec.slug, spec.version): spec for spec in PREDICATE_SPECS}
 _PREDICATE_SPECS_BY_VERSION_ID = {

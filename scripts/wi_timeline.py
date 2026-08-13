@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from predictelection import query
 from predictelection.clients.sqlalchemy_engine import SqlAlchemyEngineClient
+from predictelection.sql import EndorsementValue
 
 CONTEST = "ocd-division/country:us/state:wi/governor/2026/primary/democratic"
 
@@ -87,7 +88,11 @@ with SqlAlchemyEngineClient().session_factory() as session:
         key=lambda row: (row.valid_from or datetime.min, row.subject.name),
     )
     for row in endorsements:
-        strength = (row.value or {}).get("strength", "?")
+        # Narrowed on the predicate: `claims_with("endorsed")` promises this
+        # payload, and the union makes reading it without checking a type error.
+        strength = (
+            row.value.strength if isinstance(row.value, EndorsementValue) else "?"
+        )
         started = row.valid_from.date() if row.valid_from else "?"
         ended = row.valid_to.date() if row.valid_to else "open"
         backed = row.object.name if row.object else "(unnamed)"

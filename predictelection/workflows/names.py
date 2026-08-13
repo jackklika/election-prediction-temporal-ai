@@ -16,6 +16,7 @@ RESEARCH_WORKFLOWS: Final[dict[str, str]] = {
     "debates": "ResearchDebatesWorkflow",
     "structure": "ResearchStructureWorkflow",
     "candidacies": "ResearchCandidaciesWorkflow",
+    "donations": "ResearchDonationsWorkflow",
 }
 """CLI name to workflow name. Add a research domain here and it is triggerable."""
 

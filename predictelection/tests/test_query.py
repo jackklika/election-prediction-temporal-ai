@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from predictelection import query
 from predictelection.sql import (
+    AssessmentValue,
     EntityKind,
     EvidenceStance,
     Poll,
@@ -166,7 +167,8 @@ def test_a_predicate_this_package_has_no_code_for_still_reads(
 
     (row,) = query.claims_with(session, "assessed")
     assert row.subject.name == "A Rater"
-    assert row.value is not None and row.value["rating"] == "strong"
+    assert isinstance(row.value, AssessmentValue)
+    assert row.value.rating == "strong"
 
 
 def test_asking_at_a_moment_uses_the_interval(session: Session) -> None:

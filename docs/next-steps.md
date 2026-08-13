@@ -10,12 +10,33 @@ its §10 traps list will save you real time. This file is only the *what next*,
 and why, mapped to the README's Target Structure.
 
 **Uncommitted at handoff:** this file and `scripts/wi_timeline.py`. Everything
-else is committed as of `e18e9d8`.
+else is committed as of `1774360`.
 
-**One-line summary:** ingestion is done and proven; the candidacy agent was
-silently truncating its output (fixed, unverified — item 1); after that the
-bottleneck is that **nothing reads the graph** — no review queue consumer, no
-query surface.
+**One-line summary:** ingestion is done and proven, and as of 2026-08-13 the
+candidacy agent is proven live too — the Wisconsin in→out→in lifecycle is
+queryable from scraped facts alone. The bottleneck is now that **little reads the
+graph**: the review queue has a CLI, but there is no query surface, and no
+integrity check on claims that contradict each other.
+
+> **Update, later sessions.** Items 1, 1.2 and 2 are all done now:
+>
+> - **A truncated agent run now fails.** `ResearchWorkflow.ask` in
+>   `workflows/base.py` inspects the final `ModelResponse` and raises a
+>   non-retryable `ApplicationError` on `finish_reason` in
+>   `{length, content_filter, error}` or `state == "incomplete"`. All three
+>   `gather` methods go through it. Covered without Temporal in
+>   `test_workflow_guard.py` and end to end in `test_workflows.py`.
+> - **The review queue is readable.** `sql/review_queue.py` plus
+>   `predictelection/review.py` — `make review`, `make review-next`. The 18
+>   pending tasks render with their pollster, contest, merge candidates and,
+>   for the disagreement task, both competing readings side by side.
+> - **A merge now survives the next import.** `resolve_pollster` did not follow
+>   `EntityRedirect`, so any merge would have been undone by the next poll
+>   import, silently. Fixed, with a regression test that was checked to fail
+>   without the fix.
+>
+> **The live candidacy re-run is done and it passed.** Item 1 is closed; see
+> "Verified live" below for what it produced and the three gaps it exposed.
 
 ---
 
@@ -42,14 +63,17 @@ than the code can produce):
 | polls | ~380 | Wikipedia, 7 races |
 | `contest_result` | 7 | Wikipedia, WI 2026 Dem gubernatorial primary |
 
-Claims exist for only 3 predicates (`candidate_in`, `party_affiliation`,
-`contest_result`) because the debates/structure agents have not been re-run since
-the rebuild. That is a data gap, not a code gap.
+Claims exist for 4 predicates — `candidate_in` 17,663, `party_affiliation`
+15,267, `endorsed` 8, `contest_result` 7 — because the debates/structure agents
+have not been re-run since the rebuild. That is a data gap, not a code gap. The
+two large counts are FEC bulk; the two small ones are the Wisconsin race, and are
+the only claims in the database an agent wrote.
 
-**The candidacy agent returned zero records, the cause is known, and the fix is
-in.** It has not been re-run — that is item 1 below.
+**The candidacy agent returned zero records on its first two runs; the fix is in
+and run 4 confirmed it** (item 1). Kept here because the failure mode is the
+instructive part:
 
-Root cause, from the Logfire trace: **both live runs ended with
+Root cause, from the Logfire trace: **both of those runs ended with
 `finish_reason: length`.** `max_tokens` was never set, so pydantic-ai's default of
 **4096** applied; the structured output was truncated mid-generation, and because
 `CandidacyFindings` defaults its list fields to `()`, a truncation was reported as
@@ -63,58 +87,80 @@ ceiling was being spent on thinking before any answer was written. The earlier
 run burned 4,096 output tokens, the later one 19,010, and neither finished.
 
 The *storage* model is proven (13 lifecycle tests on fixture data with the real
-dates). The *agent* is unproven either way: it never got to emit a complete
-answer, so nothing is yet known about whether it can read a timeline out of prose.
-`endorsed` has a code writer and tests but no live data.
+dates). The *agent* is now proven too: it read a two-stint timeline out of prose
+across eight separate news pages, and `endorsed` has live data — though only
+`full`, never `WITHDRAWN`. See item 1.
 
 ---
 
 ## Next, in priority order
 
-### 1. Re-run the candidacy agent with the max_tokens fix in place
+### 1. ~~Re-run the candidacy agent~~ — **verified live, 2026-08-13**
 
-The fix is committed but **unverified against a live run**. Restart the worker so
-it reloads `agents/base.py`, then:
+Run 4 (`019ffbb5`, 5m01s, `AGENT_MAX_TOKENS = 32_000`) succeeded: **15 records,
+16 claims, `misaligned_count = 0`, no skipped URLs.** The acceptance bar is met
+and then some — `scripts/wi_timeline.py` returns **five** distinct candidate sets,
+with Crowley present on 06-15, **absent** on 07-10, and back for 08-11, entirely
+from interval claims:
 
-```bash
-make worker
-make research SUBJECT="2026 Wisconsin Democratic gubernatorial primary" KIND=candidacies
-uv run python scripts/wi_timeline.py
+```
+2026-06-15  Crowley, Hong, Brennan, Roys, Barnes, Hughes, Rodriguez
+2026-07-10  Hong, Brennan, Roys, Barnes, Rodriguez          <- Crowley out
+2026-08-11  Crowley, Hong, Brennan, Roys                    <- Crowley back
 ```
 
-Acceptance bar: **three different candidate sets for 2026-06-15, 07-10 and
-08-11** from interval claims alone, and "mid-July" landing as `MONTH` precision.
-Only then is the agent half of the lifecycle proven.
+Crowley carries **two `candidate_in` claims** (2025-09-09→2026-07-08 and
+2026-07-18→open), which is the whole point: a re-entry is a second interval, not
+an overwritten flag. The agent also found two withdrawals nobody had told it
+about (Barnes 07-30, Hughes 06-22) and eight endorsements including the
+Crowley→Rodriguez one. Every claim traces to real archived bytes — eight distinct
+news pages, 92–287 KB each, in MinIO.
 
-If it still comes back empty, check in this order:
+Three things this exposed, in the order I would fix them:
 
-1. **`finish_reason` again.** 32k may still be short for a seven-candidate field
-   with stints plus endorsements plus thinking. Sonnet 5 allows 128k output, so
-   raise `AGENT_MAX_TOKENS` before suspecting anything subtler.
-2. **Make empty output loud** — worth doing regardless of whether it is still
-   broken. Both `CandidacyFindings` fields default to `()`, and so do
-   `DebateFindings`', so a truncated or refused response is indistinguishable
-   from an honest "nothing found". This is the *fourth* time in one session that
-   an empty result read as a working one. A `finish_reason: length` should fail
-   the activity, not return defaults.
-3. **The subject/lookup mismatch.** The subject is a *race* ("2026 Wisconsin
-   Democratic gubernatorial primary") but `gather()` in
-   `workflows/candidacies.py` looks up already-known **people** by that string
-   for its `ALREADY RECORDED` block — so the block was empty and the prompt got
-   no anchor. Consider looking up the *contest* instead.
-4. **Schema size.** `ScrapedCandidacy` is the heaviest record here — a
-   regex-checked OCD division, office, cycle, stage, party, plus nested stints —
-   and `ScrapedEndorsement` repeats every race field. Since the caller usually
-   knows the division/office/cycle, consider passing them in and asking the agent
-   only for people, dates and endorsements. Same "derive, do not ask" rule
-   already applied to contest keys.
+1. **"mid-July" was never tested, because the agent went around it.** Every stint
+   is `day` precision citing a dated news article (`wpr.org/news/sara-rodriguez-
+   drop…` for the withdrawal Wikipedia calls "mid-July"). That is *better*
+   behaviour than the acceptance bar asked for, but it means the `MONTH`-precision
+   path still has **only fixture coverage** (`test_research_candidacies.py:214`).
+   Do not claim it is proven live. Crowley's 07-18 re-entry is a relative date
+   ("ten days after") resolved against a stated anchor, which is the rule working
+   as intended.
+2. **An endorsement that lapses stays open forever.** All eight endorsements are
+   `strength=full` with `valid_to = NULL`, so the graph asserts Crowley *still*
+   endorses the candidate he re-entered against and beat. `EndorsementStrength.
+   WITHDRAWN` has a writer and a test (`:314`) but no live data. Strictly the
+   agent is right — no source it read said "Crowley rescinded" — so the fix is not
+   to infer it. It is an **integrity check**: an `endorsed` interval that overlaps
+   a `candidate_in` interval for the endorser *in the same contest* is a
+   contradiction, and `integrity.py` is where that belongs. It would have caught
+   this without anyone reading the timeline.
+3. **Agent runs write no provenance to `research_run`.** `model_id`, `raw_output`
+   and `research_run_input` are all empty for all three candidacy runs — the
+   importers populate `research_run_input`, the agent path never does
+   (`ResearchRunInput(` appears only in `importers/base.py:348`), and
+   `workflows/base.py:208` builds `StartResearchRunInput` without `model_id`.
+   Consequences: you cannot ask "which sources did this run read", a record that
+   was archived but produced no new claims leaves no trace at all, and
+   `skipped_urls` exists only in the workflow's return value. Reconstructing it
+   through claims→assertions→anchors only works for records that wrote something.
 
-**The agent infrastructure is sound, so do not start there:** the debates agent
-returned real records the same day on the same worker and model config — 3 to 6
-debates per run with correct sources, archived pages and `alignment=1.0`.
+If a future run *does* fail, `ask` now names the reason and the output-token
+count in `research_run.error_message`, so start there rather than in Logfire. 32k
+was enough for a seven-candidate field with stints plus endorsements plus `high`
+effort thinking, but not by a margin anyone measured; Sonnet 5 allows 128k.
 
-Then re-run `KIND=debates` and `KIND=structure` so the graph has events and
-contest structure again.
+Two hypotheses from the previous session that the successful run **disproved** —
+do not spend time on either:
+
+- *"The subject/lookup mismatch starved the prompt."* `gather()` does still look
+  up **people** by a race name for its `ALREADY RECORDED` block, so that block is
+  still empty. It did not matter. Worth tidying, not debugging.
+- *"`ScrapedCandidacy` is too heavy a schema."* It emitted 15 of them, nested
+  stints and all, in one response.
+
+Still worth doing: re-run `KIND=debates` and `KIND=structure` so the graph has
+events and contest structure again.
 
 ### 1b. Reading Logfire traces — worth the ten minutes
 
@@ -141,39 +187,70 @@ curl -s -G https://logfire-us.pydantic.dev/v1/query \
 
 `finish_reasons` is the first field to look at on any agent behaving oddly.
 
-### 2. Something reads the review queue — README Target Structure #2
+### 2. Something reads the review queue — README Target Structure #2 — **done**
 
-**The biggest gap between the code and the stated goals.** `ReviewTask` is
-written by four different paths and *nothing reads it*. Human-in-the-loop review
-with fact corrections is an explicit target, and right now it is a write-only
-table.
+`sql/review_queue.py` reads and answers it; `predictelection/review.py` is the
+CLI over that (`make review`, `make review-next`, plus `show`, `accept`,
+`reject`, `merge`). Decisions go through `new_review_decision`, whose key is a
+per-action token rather than a hash of the outcome — `idempotency_key` documents
+that exception for exactly this table, so a reviewer can reverse a decision
+without colliding with their earlier one.
 
-The pieces already exist: `ReviewDecision` (immutable, append-only),
-`ClaimSupersession` + `new_claim_supersession`, `EntityRedirect` for merging
-duplicate entities. What is missing is anything that *lists* open tasks and
-*records* a decision. A CLI is enough to start — `make review` listing pending
-tasks with their reason and claim, and accepting accept/reject/merge. Real
-queue content is waiting: pollster lookalikes (`UC Berkeley` vs
-`UC Berkeley IGS` — genuinely the same org, needs a redirect) and one poll where
-two sources disagree.
+Two things learned building it, both now tested:
 
-The README also wants corrections to "help agents understand where they went
-wrong". That is a second step: feed accepted corrections back as prompt context.
-Do not build it before the queue is readable.
+- **A merge has to be applied through `resolve_entity`, and read through it too.**
+  `resolve_pollster` did neither and would have un-merged every merge on the next
+  import.
+- **A "resembles an existing pollster" task and a "two sources disagree" task
+  need different things shown.** The second is undecidable without both readings,
+  and the payload is not stored — only its hash — so the comparison has to be
+  rebuilt from `poll_option`/`poll_estimate`. `_readings` does that.
+- **Accepting one reading of a poll is only half an answer.** The rival revision
+  keeps its own estimate rows, so any query that does not filter by revision
+  still reads both, and `PollRevision` is immutable — `supersedes_revision_id`
+  can only be set when the row is written, which is the importer's moment, not
+  the reviewer's. So the losing reading gets a `ReviewDecision` of its own:
+  `decide_reading`, reachable as `--reject-rivals` on `accept` and as a prompt
+  in the walk. **Readers of poll estimates should honour it** — nothing filters
+  on it yet, because nothing reads poll estimates for a human at all. That is
+  item 3's problem to inherit.
 
-### 3. A read surface — README Target Structure #3
+What is **not** done is the second half of the README's target: feeding accepted
+corrections back to agents as prompt context. It needs a body of decisions to
+feed, so work the queue first — `make review-next` over the 18 waiting tasks is
+about ten minutes and produces exactly that corpus.
 
-`find_entities`/`find_events` exist for the *agents'* benefit. Asking questions
-of the data needs something else. Start with the handful of queries that already
-have data behind them:
+### 3. A read surface — README Target Structure #3 — **the module exists**
 
-- polls for a contest over time (the timeline shape backtesting wants)
-- candidates by contest, with their stints
-- results joined to `contest_for_office` — winners by office
-- what is unreviewed
+`predictelection/query/` is it: `claims_about` / `claims_with` as the generic
+reader, plus the four projections that needed more than a claim — `candidates_in`
+(stints, and who was running at a moment), `poll_timeline`, `results_for` /
+`winners_by_office`, and `unreviewed`. All read-only, all returning frozen
+dataclasses rather than ORM rows, so nothing lazy-loads after the session closes.
 
-These are SQL today. Whether they become a module, a CLI, or an API is your call;
-the point is that nothing currently reads the graph for a human.
+Two rules it holds, both tested:
+
+- **A predicate this package has never heard of still reads.** That is the
+  ontology's payoff: `claims_with(session, "donated_to", ...)` will work the day
+  the predicate is seeded, with nothing added here.
+- **Review is respected.** `poll_timeline` drops revisions a reviewer rejected
+  and resolves pollsters through merges, so a merged firm draws one series rather
+  than two. "The latest revision" is the wrong default — the accepted one is not
+  always the last written.
+
+`scripts/wi_timeline.py` is ported onto it and contains no SQL at all — which
+is the check that the module is sufficient, and worth keeping that way: a
+question that cannot be asked through `query` is the module's gap to close, not
+that script's to work around. The port closed two gaps itself. Nothing could
+reach a claim's citation (`evidence_for` now can), and the projections dropped
+the claim id, so a result could not be traced back to what said so (every
+projected row now keeps one).
+
+What is left is the surface over it: an API and a UI.
+
+`winners_by_office` returns nothing today. That is a **data** gap, not a bug:
+`contest_for_office` has zero claims because the structure agent has not been
+re-run since the rebuild, and general-election results carry `won = NULL`.
 
 ### 4. Backtesting needs more results
 
@@ -238,6 +315,17 @@ The full list is `ingestion-roadmap.md` §10. The five that cost the most time:
 5. **`TemporalDurability` retries model calls forever by default.** A too-short
    `start_to_close_timeout` becomes a paid infinite loop, not a failure.
    `AGENT_MAX_ATTEMPTS` caps it — keep the cap.
+6. **A merge is not applied until every reader follows the redirect.**
+   `resolve_pollster` returned the alias row's owner directly, so merging two
+   pollsters would have been undone by the next import of the merged-away
+   spelling — the merge *looked* applied and the redirect row existed. Any new
+   name-to-entity lookup goes through `resolve_entity`, and the test for it is
+   "merge, then import again", not "merge, then read the redirect".
+7. **An exception in workflow code that is not a `FailureError` retries the
+   workflow task forever.** A `result.usage()` on what is actually a property
+   turned a one-line guard into a hung test run with no output. Anything raised
+   from a workflow body should be an `ApplicationError`, and the body around it
+   should be dull enough not to raise anything else.
 
 ## Running things
 
@@ -257,6 +345,10 @@ uv run python -m predictelection.importers.run wikipedia-results \
 
 make worker                       # in one terminal
 make research SUBJECT="..." KIND=debates|structure|candidacies
+
+make review                       # the queue
+make review ARGS="show 6d6d24ba"  # one task, with its readings and lookalikes
+make review-next                  # walk it: a/r/m/s/q per task
 ```
 
 `--normalize` lets a model rewrite cells the strict parsers refuse; the rewrite
