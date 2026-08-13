@@ -19,6 +19,7 @@ from predictelection.sql import (
     Entity,
     EntityKind,
     EntityRedirect,
+    Poll,
     ReviewDecision,
     ReviewerKind,
     ReviewOutcome,
@@ -26,6 +27,7 @@ from predictelection.sql import (
     ReviewTaskStatus,
     TimePrecision,
     decide,
+    decide_reading,
     find_entity_redirect_chains,
     find_task,
     merge_entities,
@@ -210,6 +212,58 @@ def test_a_decision_must_say_who_made_it(session: Session) -> None:
         )
 
 
+def test_declining_a_merge_must_say_why(session: Session) -> None:
+    """The asymmetry that makes this worth enforcing: a merge writes a redirect
+    anyone can read later, while declining one writes nothing but the decision.
+    A blank reason there is indistinguishable from a stray keypress — and one
+    already got recorded that way.
+    """
+
+    task = _task(session)
+    _org(session, "Example Polling Co")  # gives the task a merge candidate
+    assert task_view(session, task).target.candidates
+
+    with pytest.raises(ValueError, match="not the same thing"):
+        decide(
+            session,
+            task,
+            outcome=ReviewOutcome.ACCEPTED,
+            reviewer="jack",
+            action_token=str(uuid.uuid4()),
+        )
+    assert task.status is ReviewTaskStatus.PENDING
+
+    decide(
+        session,
+        task,
+        outcome=ReviewOutcome.ACCEPTED,
+        reviewer="jack",
+        reason="different firms that share a common word",
+        action_token=str(uuid.uuid4()),
+    )
+    assert task.status is ReviewTaskStatus.COMPLETED
+
+
+def test_accepting_a_task_with_no_merge_candidates_needs_no_reason(
+    session: Session,
+) -> None:
+    """The rule is scoped to the decision it protects. Most tasks have nothing to
+    merge with, and demanding prose for every one of them makes the queue slower
+    without recording anything a reader needs."""
+
+    task = _task(session)
+    assert not task_view(session, task).target.candidates
+
+    decide(
+        session,
+        task,
+        outcome=ReviewOutcome.ACCEPTED,
+        reviewer="jack",
+        action_token=str(uuid.uuid4()),
+    )
+    assert task.status is ReviewTaskStatus.COMPLETED
+
+
 def test_an_automated_decision_is_recorded_as_one(session: Session) -> None:
     """The reviewer kind exists so a rule's verdict is not read as a person's."""
 
@@ -223,6 +277,129 @@ def test_an_automated_decision_is_recorded_as_one(session: Session) -> None:
         action_token=str(uuid.uuid4()),
     )
     assert decision.reviewer_kind is ReviewerKind.AUTOMATED_RULE
+
+
+# ----------------------------------------------------------------- readings
+
+
+def _disputed(session: Session):
+    """One poll read two different ways, with a task on the second reading.
+
+    The real shape of the "two sources disagree" task: both revisions keep their
+    own estimate rows, and only the later one was queued.
+    """
+
+    pollster = make_entity(
+        session, kind=EntityKind.ORGANIZATION, canonical_name="Example Polling"
+    )
+    first = make_poll_revision(
+        session,
+        pollster_id=pollster.id,
+        created_by="import_wikipedia_polls",
+        payload={"reading": "one"},
+    )
+    second = make_poll_revision(
+        session,
+        poll=session.get(Poll, first.poll_id),
+        revision_number=2,
+        pollster_id=pollster.id,
+        created_by="import_wikipedia_polls",
+        payload={"reading": "two"},
+    )
+    task = ReviewTask(poll_revision=second, reason="two sources disagree")
+    session.add(task)
+    session.flush()
+    return task, first, second
+
+
+def test_a_disputed_poll_shows_every_reading_with_its_revision(
+    session: Session,
+) -> None:
+    """Both readings, and which one is under review — the ids matter as much as
+    the text, because answering means saying something about the other one."""
+
+    task, first, second = _disputed(session)
+
+    view = task_view(session, task)
+    numbers = [reading.revision_number for reading in view.target.readings]
+    assert numbers == [1, 2]
+    assert [r.revision_id for r in view.target.rivals] == [first.id]
+    assert (
+        next(r for r in view.target.readings if r.is_subject).revision_id == second.id
+    )
+
+
+def test_accepting_one_reading_can_say_the_other_is_not_it(session: Session) -> None:
+    """The gap this closes: an accepted reading used to leave its rival live and
+    indistinguishable from it, and `PollRevision` is immutable so the losing row
+    cannot be marked. The decision is the only place it can be said."""
+
+    task, first, second = _disputed(session)
+    view = task_view(session, task)
+
+    decide(
+        session,
+        task,
+        outcome=ReviewOutcome.ACCEPTED,
+        reviewer="jack",
+        reason="sums to 100 and keeps every candidate",
+        action_token=str(uuid.uuid4()),
+    )
+    decide_reading(
+        session,
+        view.target.rivals[0].revision_id,
+        outcome=ReviewOutcome.REJECTED,
+        reviewer="jack",
+        reason="reading 2 was accepted instead",
+        action_token=str(uuid.uuid4()),
+    )
+
+    decisions = {
+        decision.poll_revision_id: decision.outcome
+        for decision in session.scalars(select(ReviewDecision))
+    }
+    assert decisions == {
+        second.id: ReviewOutcome.ACCEPTED,
+        first.id: ReviewOutcome.REJECTED,
+    }
+
+
+def test_a_reading_with_its_own_open_task_is_not_decided_sideways(
+    session: Session,
+) -> None:
+    """Deciding it here would leave its task pending with a verdict already
+    recorded against it — it would come back tomorrow, already answered."""
+
+    task, first, _ = _disputed(session)
+    session.add(ReviewTask(poll_revision_id=first.id, reason="its own concern"))
+    session.flush()
+
+    with pytest.raises(ValueError, match="open task"):
+        decide_reading(
+            session,
+            first.id,
+            outcome=ReviewOutcome.REJECTED,
+            reviewer="jack",
+            reason="superseded",
+            action_token=str(uuid.uuid4()),
+        )
+
+
+def test_a_verdict_on_an_unqueued_reading_must_say_why(session: Session) -> None:
+    """Including an acceptance, unlike `decide`: nobody asked about this row, so
+    something has to explain why it was ruled on at all."""
+
+    _, first, _ = _disputed(session)
+    for outcome in (ReviewOutcome.ACCEPTED, ReviewOutcome.REJECTED):
+        with pytest.raises(ValueError, match="must say why"):
+            decide_reading(
+                session,
+                first.id,
+                outcome=outcome,
+                reviewer="jack",
+                reason="  ",
+                action_token=str(uuid.uuid4()),
+            )
 
 
 # ------------------------------------------------------------------ merging

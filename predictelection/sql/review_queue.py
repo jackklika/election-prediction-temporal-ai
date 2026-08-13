@@ -74,6 +74,19 @@ class MergeCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class Reading:
+    """One revision's account of a poll, as a reviewer needs to compare them."""
+
+    revision_id: uuid.UUID
+    revision_number: int
+    is_subject: bool
+    """Whether this is the reading the task was filed about."""
+
+    summary: str
+    recorded_by: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewTarget:
     """What the task is about, rendered for someone who has to judge it.
 
@@ -98,6 +111,20 @@ class ReviewTarget:
 
     candidates: tuple[MergeCandidate, ...] = ()
     """Merge targets, when the concern is that two entities are one."""
+
+    readings: tuple[Reading, ...] = ()
+    """Every revision of this poll, so two accounts of it can be compared.
+
+    Carries the revision ids rather than only the rendered text, because
+    accepting one reading is only half an answer: the others are still live, and
+    saying so needs their ids.
+    """
+
+    @property
+    def rivals(self) -> tuple[Reading, ...]:
+        """The readings that are not the one under review."""
+
+        return tuple(reading for reading in self.readings if not reading.is_subject)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,10 +216,27 @@ def decide(
     show up again tomorrow, and a closed task with no decision would lose why.
     `ck_review_task_completion_matches_status` enforces the second half of it —
     a completed task must carry a `completed_at`.
+
+    Acceptance normally needs no argument, with one exception: a task that offers
+    merge candidates. Accepting *that* is a substantive finding — "I looked at
+    these two and they are different things" — and it is the answer that leaves no
+    other trace. A merge writes a redirect anyone can see later; declining one
+    writes nothing at all, so if the reason is blank the reasoning is gone, and a
+    reader cannot tell a judgement from a stray keypress.
     """
 
     if task.status in {ReviewTaskStatus.COMPLETED, ReviewTaskStatus.CANCELLED}:
         raise ValueError(f"task {task.id} is already {task.status.value}")
+
+    if (
+        outcome is ReviewOutcome.ACCEPTED
+        and not (reason or "").strip()
+        and _target(session, task).candidates
+    ):
+        raise ValueError(
+            "this task offers merge candidates, so accepting it without merging "
+            "must say why they are not the same thing"
+        )
 
     decision = new_review_decision(
         action_token=action_token,
@@ -208,6 +252,65 @@ def decide(
 
     task.status = ReviewTaskStatus.COMPLETED
     task.completed_at = datetime.now(UTC)
+    session.flush()
+    return decision
+
+
+def decide_reading(
+    session: Session,
+    revision_id: uuid.UUID,
+    *,
+    outcome: ReviewOutcome,
+    reviewer: str,
+    action_token: str,
+    reason: str,
+    reviewer_kind: ReviewerKind = ReviewerKind.HUMAN,
+) -> ReviewDecision:
+    """Record a verdict on a poll revision that has no task of its own.
+
+    Accepting one reading of a poll is only half an answer. The rival reading is
+    still there, still has its own `poll_option` and `poll_estimate` rows, and any
+    query that does not filter by revision still sees it — so "revision 2 is
+    right" has to be sayable as "and revision 1 is not".
+
+    A separate function from `decide` because there is no queue state to move:
+    only the task-bearing revision was ever queued. And it cannot be done by
+    editing the losing revision either — `PollRevision` is immutable, so
+    `supersedes_revision_id` can only be set when the row is written, which is
+    the importer's moment and not the reviewer's. The decision *is* the record.
+
+    A reason is required in every direction here, including acceptance: a verdict
+    on a row nobody asked about needs to say what prompted it.
+    """
+
+    if not reason.strip():
+        raise ValueError("a verdict on an unqueued reading must say why")
+    if session.get(PollRevision, revision_id) is None:
+        raise ValueError(f"no poll revision {revision_id}")
+
+    open_task = session.scalar(
+        select(ReviewTask.id).where(
+            ReviewTask.poll_revision_id == revision_id,
+            ReviewTask.status.in_({ReviewTaskStatus.PENDING, ReviewTaskStatus.CLAIMED}),
+        )
+    )
+    if open_task is not None:
+        # Deciding it here would leave its task pending and it would come back
+        # tomorrow, with a decision already recorded against it.
+        raise ValueError(
+            f"revision {revision_id} has open task {str(open_task)[:8]}; "
+            "decide that instead"
+        )
+
+    decision = new_review_decision(
+        action_token=action_token,
+        outcome=outcome,
+        reviewer_identifier=reviewer,
+        reviewer_kind=reviewer_kind,
+        reason=reason,
+        poll_revision_id=revision_id,
+    )
+    session.add(decision)
     session.flush()
     return decision
 
@@ -329,14 +432,16 @@ def _poll_revision_target(session: Session, revision_id: uuid.UUID) -> ReviewTar
     # sources disagree about its contents" is undecidable without them: the
     # payload itself is not stored, only its hash, so the disagreement lives in
     # these rows and nowhere else.
-    for sibling in _revisions_of(session, revision.poll_id):
-        marker = " *" if sibling.id == revision_id else ""
-        details.append(
-            (
-                f"reading {sibling.revision_number}{marker}",
-                _readings(session, sibling.id),
-            )
+    readings = tuple(
+        Reading(
+            revision_id=sibling.id,
+            revision_number=sibling.revision_number,
+            is_subject=sibling.id == revision_id,
+            summary=_readings(session, sibling.id),
+            recorded_by=sibling.created_by or "(unattributed)",
         )
+        for sibling in _revisions_of(session, revision.poll_id)
+    )
 
     return ReviewTarget(
         kind="poll_revision",
@@ -345,6 +450,7 @@ def _poll_revision_target(session: Session, revision_id: uuid.UUID) -> ReviewTar
         details=tuple(details),
         subject_entity_id=revision.pollster_id,
         candidates=_merge_candidates(session, pollster_name, revision.pollster_id),
+        readings=readings,
     )
 
 
@@ -505,9 +611,11 @@ def _name(session: Session, entity_id: uuid.UUID | None) -> str | None:
 __all__ = [
     "DEFAULT_LIMIT",
     "MergeCandidate",
+    "Reading",
     "ReviewTarget",
     "ReviewTaskView",
     "decide",
+    "decide_reading",
     "find_task",
     "merge_entities",
     "pending_tasks",

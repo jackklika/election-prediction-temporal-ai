@@ -144,9 +144,11 @@ from predictelection.sql.lookup import (
 )
 from predictelection.sql.review_queue import (
     MergeCandidate,
+    Reading,
     ReviewTarget,
     ReviewTaskView,
     decide,
+    decide_reading,
     find_task,
     merge_entities,
     pending_tasks,
@@ -232,6 +234,7 @@ __all__ = [
     "PredicateValue",
     "PredicateVersion",
     "PublicStatementValue",
+    "Reading",
     "RecordOrigin",
     "RecordedClaim",
     "ResearchRun",
@@ -266,6 +269,7 @@ __all__ = [
     "check_graph_integrity",
     "create_schema",
     "decide",
+    "decide_reading",
     "find_claim_assertion_supersession_cycle",
     "find_claim_supersession_cycle",
     "find_cycle",

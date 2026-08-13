@@ -44,6 +44,7 @@ from predictelection.sql import (
     ReviewTaskStatus,
     ReviewTaskView,
     decide,
+    decide_reading,
     find_entities,
     find_task,
     merge_entities,
@@ -74,6 +75,7 @@ def main() -> None:
                 outcome=ReviewOutcome.ACCEPTED,
                 reviewer=_reviewer(args),
                 reason=args.reason,
+                reject_rivals=args.reject_rivals,
             )
         elif args.command == "reject":
             _decide_one(
@@ -126,6 +128,15 @@ def _parser() -> argparse.ArgumentParser:
     accepting = sub.add_parser("accept", help="The data is right as recorded.")
     accepting.add_argument("task")
     accepting.add_argument("--reason", default=None)
+    accepting.add_argument(
+        "--reject-rivals",
+        action="store_true",
+        help=(
+            "Also record that the poll's other readings are not the accepted "
+            "one. They stay in the database either way; this is what says which "
+            "to believe."
+        ),
+    )
 
     rejecting = sub.add_parser("reject", help="The data is wrong. Says why.")
     rejecting.add_argument("task")
@@ -188,6 +199,15 @@ def _render(view: ReviewTaskView) -> str:
     width = max((len(label) for label, _ in view.target.details), default=0)
     for label, value in view.target.details:
         lines.append(f"  {label:<{width}}  {value}")
+    if view.target.readings:
+        # `*` marks the reading the task is about; the others are what accepting
+        # it argues against, so they are shown even when there is only one.
+        lines += ["", "  readings of this poll:"]
+        lines += [
+            f"    {'*' if reading.is_subject else ' '} {reading.revision_number}. "
+            f"{reading.summary}"
+            for reading in view.target.readings
+        ]
     if view.reason:
         lines += ["", "  flagged because:", f"    {view.reason}"]
     if view.target.candidates:
@@ -217,9 +237,11 @@ def _decide_one(
     outcome: ReviewOutcome,
     reviewer: str,
     reason: str | None,
+    reject_rivals: bool = False,
 ) -> None:
     with session_factory() as session, session.begin():
         task = find_task(session, prefix)
+        view = task_view(session, task)
         decide(
             session,
             task,
@@ -229,6 +251,51 @@ def _decide_one(
             action_token=str(uuid.uuid4()),
         )
         print(f"{str(task.id)[:8]}  {outcome.value}")
+        if reject_rivals:
+            _reject_rivals(session, view, reviewer=reviewer, reason=reason)
+
+
+def _reject_rivals(
+    session: Session,
+    view: ReviewTaskView,
+    *,
+    reviewer: str,
+    reason: str | None,
+) -> None:
+    """Say that the other readings of this poll are not the accepted one.
+
+    Without this, accepting a reading leaves its rival live and indistinguishable
+    from it: both keep their estimate rows, and a query that does not filter by
+    revision reads both. The losing revision cannot be edited to say so —
+    `PollRevision` is immutable — so the statement has to be a decision.
+    """
+
+    accepted = next(
+        (reading for reading in view.target.readings if reading.is_subject), None
+    )
+    for rival in view.target.rivals:
+        explanation = (
+            f"reading {accepted.revision_number} of this poll was accepted instead"
+            if accepted
+            else "not the accepted reading of this poll"
+        )
+        try:
+            decide_reading(
+                session,
+                rival.revision_id,
+                outcome=ReviewOutcome.REJECTED,
+                reviewer=reviewer,
+                reason=f"{explanation}{f': {reason}' if reason else ''}",
+                action_token=str(uuid.uuid4()),
+            )
+        except ValueError as error:
+            # Usually "it has an open task of its own", which is a queue entry
+            # waiting a few lines further down. Reported rather than raised: the
+            # accept already stands, and losing it to a rival's bookkeeping
+            # would be the worse outcome.
+            print(f"  reading {rival.revision_number}  left alone — {error}")
+            continue
+        print(f"  reading {rival.revision_number}  rejected")
 
 
 def _merge_one(
@@ -393,15 +460,36 @@ def _walk(session_factory: sessionmaker[Session], *, reviewer: str, limit: int) 
             if action.startswith("s") or not action:
                 continue
             if action.startswith("a"):
-                decide(
-                    session,
-                    task,
-                    outcome=ReviewOutcome.ACCEPTED,
-                    reviewer=reviewer,
-                    reason=_prompt("  note (optional) > ") or None,
-                    action_token=str(uuid.uuid4()),
+                # Declining a merge is a finding, and the note is the only trace
+                # it leaves — so it is demanded rather than offered.
+                note = (
+                    _prompt(
+                        "  why are these not the same? > "
+                        if view.target.candidates
+                        else "  note (optional) > "
+                    )
+                    or None
                 )
+                try:
+                    decide(
+                        session,
+                        task,
+                        outcome=ReviewOutcome.ACCEPTED,
+                        reviewer=reviewer,
+                        reason=note,
+                        action_token=str(uuid.uuid4()),
+                    )
+                except ValueError as error:
+                    print(f"  {error}; skipped")
+                    continue
                 print("  accepted")
+                # Only asked when there is a rival reading, so the common task —
+                # a pollster lookalike on a single-revision poll — is unchanged.
+                if view.target.rivals and _prompt(
+                    f"  mark the other {len(view.target.rivals)} reading(s) of "
+                    "this poll as rejected? [y/N] > "
+                ).lower().startswith("y"):
+                    _reject_rivals(session, view, reviewer=reviewer, reason=note)
             elif action.startswith("r"):
                 reason = _prompt("  why is it wrong? > ")
                 if not reason:
