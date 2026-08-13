@@ -338,12 +338,17 @@ Candidate columns are stored as verbatim option labels with `choice_entity_id`
 NULL — resolving "Rogers" belongs to whoever knows the contest's candidates
 (`candidate_in`), not to the poll writer.
 
-**Next: the Wikipedia importer.** Parse raw HTML (`<table>`s vanish in
-markdown/readability conversion — verified), one importer parameterized by race
-page; the polling section a table sits under (D primary / R primary / general)
-*is* the contest's stage and party. Validate table shape loudly: assert expected
-headers, skip aggregate rows, refuse rows whose percentages misalign. A poll's
-contest resolves by `ContestKey`, never by name.
+**The Wikipedia importer is built** (`importers/wikipedia_polls.py`), written
+against the real 2026 Michigan Senate page and tested on it as a fixture. What
+the page taught, beyond the design: the first table under "Polling" is an
+*aggregation* table (270toWin/DDHQ averages) that header recognition must
+exclude or every poll double-counts; and rows sharing rowspanned pollster/date
+cells — plus the general election's many head-to-head matchup tables — are one
+poll's *samples and questions*, which must be grouped before keying or a poll's
+own rows get stored as "disagreeing sources" (the first live run filed 61
+spurious reviews this way). `ScrapedPoll.samples` is plural for exactly this.
+Run it with `python -m predictelection.importers.run wikipedia-polls --url ...
+--division ... --office ... --cycle ...`.
 
 **Model note:** the pollster is not the source. `PollRevision.source_snapshot_id`
 points at where you read it; `pollster_id` at who conducted it. A secondary source

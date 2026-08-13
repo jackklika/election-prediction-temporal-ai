@@ -90,6 +90,28 @@ class PollReading(ScrapedModel):
     response_count: int | None = Field(default=None, ge=0)
 
 
+class PollSampleReadings(ScrapedModel):
+    """One row of a poll: a population sampled, and the numbers it produced.
+
+    A poll is often published as several rows sharing one pollster and one
+    fieldwork window — likely voters and registered voters, or the field with
+    and without a candidate who dropped out. Those are *samples of one poll*,
+    not disagreeing accounts of it: the first live import stored them as
+    separate revisions and filed 61 spurious "sources disagree" reviews for a
+    page containing 62 polls. The schema models this correctly (`PollSample`
+    and `PollQuestion` are per-revision, plural); this shape follows it.
+    """
+
+    population: str = Field(
+        default="unknown",
+        max_length=100,
+        description="Who was sampled: 'lv' likely voters, 'rv' registered, 'a' adults.",
+    )
+    sample_size: int | None = Field(default=None, gt=0)
+    margin_of_error: Decimal | None = Field(default=None, ge=0)
+    readings: tuple[PollReading, ...] = Field(min_length=1)
+
+
 class ScrapedPoll(ScrapedRecord):
     """One poll as a source reported it.
 
@@ -122,21 +144,16 @@ class ScrapedPoll(ScrapedRecord):
         ),
     )
     published_on: dt.date | None = None
-    sample_size: int | None = Field(default=None, gt=0)
-    margin_of_error: Decimal | None = Field(default=None, ge=0)
-    population: str = Field(
-        default="unknown",
-        max_length=100,
-        description="Who was sampled: 'lv' likely voters, 'rv' registered, 'a' adults.",
-    )
-    readings: tuple[PollReading, ...] = Field(min_length=1)
+    samples: tuple[PollSampleReadings, ...] = Field(min_length=1)
 
     def payload(self) -> dict[str, object]:
         """The interpretation, for content dedup. Excludes the citation.
 
         Two outlets printing the same numbers must hash identically, so the
         source_url stays out; it lives on the revision's snapshot, which is
-        provenance rather than identity.
+        provenance rather than identity. All samples hash together: the payload
+        is the source's complete account of the poll, and a source that shows
+        one more crosstab than another *is* giving a different account.
         """
 
         return self.model_dump(mode="json", exclude={"source_url"})
@@ -298,37 +315,47 @@ def ingest_poll(poll: ScrapedPoll, context: IngestContext) -> Ingestion:
 def _write_readings(
     session, revision: PollRevision, *, contest_id: uuid.UUID, poll: ScrapedPoll
 ) -> None:
-    sample = PollSample(
-        poll_revision_id=revision.id,
-        position=0,
-        label="overall",
-        population=poll.population,
-        sample_size=poll.sample_size,
-        margin_of_error=poll.margin_of_error,
-    )
-    question = PollQuestion(
-        poll_revision_id=revision.id,
-        contest_id=contest_id,
-        position=0,
-        text=f"{poll.contest.name} — voter preference",
-    )
-    session.add_all([sample, question])
-    session.flush()
+    """Each published row becomes one (sample, question) pair.
 
-    for position, reading in enumerate(poll.readings):
-        option = new_poll_option(
-            question=question, position=position, label=reading.label
+    Wikipedia does not say whether two rows of one poll differ by population
+    (LV vs RV) or by candidate set (with and without a dropout), so each row is
+    stored exactly as represented: its own sample and its own question, paired
+    by position. That is what `PollQuestion` says it is — "a question exactly
+    as represented in a poll revision" — and it invents nothing.
+    """
+
+    for position, block in enumerate(poll.samples):
+        sample = PollSample(
+            poll_revision_id=revision.id,
+            position=position,
+            label=block.population if len(poll.samples) > 1 else "overall",
+            population=block.population,
+            sample_size=block.sample_size,
+            margin_of_error=block.margin_of_error,
         )
-        session.add(option)
+        question = PollQuestion(
+            poll_revision_id=revision.id,
+            contest_id=contest_id,
+            position=position,
+            text=f"{poll.contest.name} — voter preference",
+        )
+        session.add_all([sample, question])
         session.flush()
-        session.add(
-            new_poll_estimate(
-                option=option,
-                sample=sample,
-                percentage=reading.percentage,
-                response_count=reading.response_count,
+
+        for option_position, reading in enumerate(block.readings):
+            option = new_poll_option(
+                question=question, position=option_position, label=reading.label
             )
-        )
+            session.add(option)
+            session.flush()
+            session.add(
+                new_poll_estimate(
+                    option=option,
+                    sample=sample,
+                    percentage=reading.percentage,
+                    response_count=reading.response_count,
+                )
+            )
 
 
 def _concerns(

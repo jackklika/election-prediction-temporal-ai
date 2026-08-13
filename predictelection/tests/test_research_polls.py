@@ -26,6 +26,7 @@ from predictelection.research.ingestion import IngestContext
 from predictelection.research.polls import (
     POLL_KEY_NAMESPACE,
     PollReading,
+    PollSampleReadings,
     ScrapedPoll,
     ingest_poll,
     resolve_pollster,
@@ -71,13 +72,17 @@ def _poll(**overrides: Any) -> ScrapedPoll:
         ),
         "fieldwork_started_on": date(2026, 7, 24),
         "fieldwork_ended_on": date(2026, 7, 28),
-        "sample_size": 600,
-        "margin_of_error": Decimal("4.0"),
-        "population": "lv",
-        "readings": (
-            PollReading(label="Stevens", percentage=Decimal("34")),
-            PollReading(label="El-Sayed", percentage=Decimal("32")),
-            PollReading(label="Undecided", percentage=Decimal("34")),
+        "samples": (
+            PollSampleReadings(
+                population="lv",
+                sample_size=600,
+                margin_of_error=Decimal("4.0"),
+                readings=(
+                    PollReading(label="Stevens", percentage=Decimal("34")),
+                    PollReading(label="El-Sayed", percentage=Decimal("32")),
+                    PollReading(label="Undecided", percentage=Decimal("34")),
+                ),
+            ),
         ),
     }
     return ScrapedPoll(**(base | overrides))
@@ -145,10 +150,17 @@ def test_disagreeing_sources_become_two_revisions_and_a_review(
 
     disagreeing = _poll(
         source_url="https://example.com/other",
-        readings=(
-            PollReading(label="Stevens", percentage=Decimal("35")),
-            PollReading(label="El-Sayed", percentage=Decimal("31")),
-            PollReading(label="Undecided", percentage=Decimal("34")),
+        samples=(
+            PollSampleReadings(
+                population="lv",
+                sample_size=600,
+                margin_of_error=Decimal("4.0"),
+                readings=(
+                    PollReading(label="Stevens", percentage=Decimal("35")),
+                    PollReading(label="El-Sayed", percentage=Decimal("31")),
+                    PollReading(label="Undecided", percentage=Decimal("34")),
+                ),
+            ),
         ),
     )
     ingest_poll(disagreeing, context)
@@ -260,3 +272,40 @@ def test_a_poll_needs_a_contest_key(session: Session, snapshot) -> None:
     unkeyed = _poll(contest=ScrapedEntity(name="Some Race"))
     with pytest.raises(ValueError, match="contest_key"):
         ingest_poll(unkeyed, context)
+
+
+def test_a_multi_sample_poll_is_one_revision_not_a_disagreement(
+    session: Session, snapshot
+) -> None:
+    """LV and RV rows of one poll are samples, not disagreeing sources.
+
+    The first live Wikipedia run stored them as separate revisions and filed
+    61 spurious "sources disagree" reviews for a page containing 62 polls.
+    """
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    two_sample = _poll(
+        samples=(
+            PollSampleReadings(
+                population="lv",
+                sample_size=437,
+                readings=(PollReading(label="Stevens", percentage=Decimal("39")),),
+            ),
+            PollSampleReadings(
+                population="rv",
+                sample_size=512,
+                readings=(PollReading(label="Stevens", percentage=Decimal("36")),),
+            ),
+        ),
+    )
+    ingest_poll(two_sample, context)
+    session.flush()
+
+    polls, revisions, reviews = _counts(session)
+    assert (polls, revisions, reviews) == (1, 1, 0)
+    from predictelection.sql.polling import PollSample
+
+    populations = list(
+        session.scalars(select(PollSample.population).order_by(PollSample.position))
+    )
+    assert populations == ["lv", "rv"]

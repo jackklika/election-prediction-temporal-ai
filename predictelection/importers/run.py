@@ -37,17 +37,53 @@ def _build(args: argparse.Namespace) -> Importer:
         return OcdImporter()
     if args.importer == "fec":
         return FecCandidateImporter(cycle=args.cycle)
+    if args.importer == "wikipedia-polls":
+        from predictelection.importers.wikipedia_polls import WikipediaPollsImporter
+
+        for required in ("url", "division", "office"):
+            if not getattr(args, required):
+                raise SystemExit(f"wikipedia-polls requires --{required}")
+        normalizer = None
+        if args.normalize:
+            from predictelection.importers.normalize import AnthropicCellNormalizer
+
+            normalizer = AnthropicCellNormalizer()
+        return WikipediaPollsImporter(
+            url=args.url,
+            division=args.division,
+            office=args.office,
+            cycle=args.cycle,
+            normalizer=normalizer,
+        )
     raise ValueError(args.importer)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("importer", choices=["ocd", "fec"])
+    parser.add_argument("importer", choices=["ocd", "fec", "wikipedia-polls"])
     parser.add_argument(
         "--cycle",
         type=int,
         default=2026,
-        help="FEC election cycle — the even year of the election.",
+        help="Election cycle — the even year of the election.",
+    )
+    parser.add_argument("--url", default=None, help="Race article URL.")
+    parser.add_argument(
+        "--division",
+        default=None,
+        help="OCD division the race is held in, e.g. ocd-division/country:us/state:mi",
+    )
+    parser.add_argument(
+        "--office", default=None, help="Office slug, e.g. us-senate, governor."
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help=(
+            "Let a model rewrite cells the strict parsers refuse (needs "
+            "ANTHROPIC_API_KEY). The rewrite is re-parsed strictly and the "
+            "revision is marked origin=model. Off, refusals fail their row."
+        ),
     )
     parser.add_argument(
         "--file",
