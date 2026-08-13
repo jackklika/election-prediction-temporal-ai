@@ -25,7 +25,7 @@ from predictelection.workflows.base import (
 )
 
 with workflow.unsafe.imports_passed_through():
-    from predictelection.agents.candidacies import candidacy_agent
+    from predictelection.agents.candidacies import CandidacyFindings, candidacy_agent
     from predictelection.sql import EntityKind
 
 
@@ -64,14 +64,14 @@ class ResearchCandidaciesWorkflow(ResearchWorkflow):
                 request.subject,
             )
 
-        run = await self.agent.run(
+        findings: CandidacyFindings = await self.ask(
             f"Reconstruct the candidacy timeline for {request.subject}: every "
             "candidate, the periods each was in the race, and the endorsements "
             "made during it — including any withdrawals and re-entries."
             + _already_recorded(known)
         )
         # One mixed tuple: the registry dispatches each record by its own type.
-        return run.output.candidacies + run.output.endorsements
+        return findings.candidacies + findings.endorsements
 
 
 def _already_recorded(known: FindEntitiesOutput) -> str:

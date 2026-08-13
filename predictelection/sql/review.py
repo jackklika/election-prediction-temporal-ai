@@ -20,6 +20,7 @@ from predictelection.sql.base import (
     Immutable,
     created_at_timestamp,
     enum_type,
+    idempotency_key,
     insert_sequence,
     utc_timestamp,
     uuid_primary_key,
@@ -152,6 +153,56 @@ class ReviewDecision(Immutable, Base):
             "poll_average_revision_id",
             "seq",
         ),
+    )
+
+
+def new_review_decision(
+    *,
+    action_token: str,
+    outcome: ReviewOutcome,
+    reviewer_identifier: str,
+    reviewer_kind: ReviewerKind = ReviewerKind.HUMAN,
+    reason: str | None = None,
+    claim_assertion_id: uuid.UUID | None = None,
+    poll_revision_id: uuid.UUID | None = None,
+    poll_average_revision_id: uuid.UUID | None = None,
+) -> ReviewDecision:
+    """One reviewer's verdict on one target, keyed by the action that made it.
+
+    The key is derived from `action_token` rather than from the decision's
+    content, which is the rule `idempotency_key` states for this table and not an
+    oversight: review is interactive, not retried, and a reviewer must be able to
+    change their mind — including back to an outcome they gave before. Hashing
+    (target, outcome, reason) would make the second reject after an accept
+    collide with the first and turn a deliberate reversal into a silent no-op.
+    A token per action makes a double-submit of *one* action idempotent, which is
+    the thing actually worth protecting against.
+
+    The three CHECK constraints on the table are all restated here so a bad call
+    fails at the call site, where the reviewer is, rather than on flush.
+    """
+
+    targets = [claim_assertion_id, poll_revision_id, poll_average_revision_id]
+    if sum(target is not None for target in targets) != 1:
+        raise ValueError("a review decision is about exactly one target")
+    if not action_token.strip():
+        raise ValueError("a review decision needs an action token to key on")
+    if not reviewer_identifier.strip():
+        raise ValueError("a review decision must say who made it")
+    if outcome is not ReviewOutcome.ACCEPTED and not (reason or "").strip():
+        # Accepting needs no argument; anything else is a correction, and a
+        # correction nobody explained cannot teach an agent what went wrong.
+        raise ValueError(f"a {outcome.value} decision must say why")
+
+    return ReviewDecision(
+        idempotency_key=idempotency_key("review_decision", action=action_token),
+        claim_assertion_id=claim_assertion_id,
+        poll_revision_id=poll_revision_id,
+        poll_average_revision_id=poll_average_revision_id,
+        outcome=outcome,
+        reviewer_kind=reviewer_kind,
+        reviewer_identifier=reviewer_identifier.strip(),
+        reason=(reason or "").strip() or None,
     )
 
 

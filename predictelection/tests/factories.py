@@ -147,7 +147,14 @@ def make_poll_revision(
     poll: Poll | None = None,
     revision_number: int = 1,
     payload: dict[str, object] | None = None,
+    **fields: object,
 ):
+    """`fields` passes anything else straight to the row — `pollster_id`, dates.
+
+    A revision is Immutable, so a caller who needs one of those cannot set it
+    afterwards; it has to be built with them.
+    """
+
     if poll is None:
         poll = Poll()
         session.add(poll)
@@ -158,6 +165,7 @@ def make_poll_revision(
         revision_number=revision_number,
         source_snapshot_id=make_snapshot(session).id,
         origin="model",
+        **fields,
     )
     session.add(revision)
     session.flush()

@@ -39,6 +39,7 @@ from predictelection.sql import (
     ClaimAssertion,
     Entity,
     ResearchRun,
+    ResearchRunStatus,
     create_schema,
     ontology_alignment_score,
 )
@@ -155,6 +156,49 @@ class StubbedResearchDebatesWorkflow(ResearchDebatesWorkflow):
         return await super().run(request)
 
 
+def _truncated_model():
+    """A model that stops mid-answer, the way an exhausted token budget does.
+
+    The findings are *empty and valid*, which is the whole point: a response cut
+    off part-way through deserialises into a findings object whose list fields
+    fell back to their `()` defaults, so the workflow used to store nothing and
+    report success. Only `finish_reason` says otherwise.
+    """
+
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    from predictelection.agents.debates import DebateFindings
+
+    def respond(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    info.output_tools[0].name,
+                    DebateFindings().model_dump(mode="json"),
+                )
+            ],
+            finish_reason="length",
+        )
+
+    return FunctionModel(respond)
+
+
+TRUNCATED_AGENT = build_agent(model=_truncated_model())
+
+
+@workflow.defn(name="TruncatedResearchDebates", sandboxed=False)
+class TruncatedResearchDebatesWorkflow(ResearchDebatesWorkflow):
+    """The real workflow whose agent never finishes its answer."""
+
+    agent = TRUNCATED_AGENT
+    __pydantic_ai_agents__ = [TRUNCATED_AGENT]
+
+    @workflow.run
+    async def run(self, request: ResearchInput) -> ResearchOutput:
+        return await super().run(request)
+
+
 @pytest.fixture
 async def workflow_env(pytestconfig, anyio_backend):
     """Temporal's time-skipping test server.
@@ -214,6 +258,7 @@ async def _run_workflow(
     client: Client,
     activities: ResearchActivities,
     request: ResearchInput,
+    workflow_type: type[ResearchDebatesWorkflow] = StubbedResearchDebatesWorkflow,
 ):
     task_queue = f"test-{uuid.uuid4()}"
     executor = ThreadPoolExecutor(max_workers=4)
@@ -221,12 +266,12 @@ async def _run_workflow(
         async with Worker(
             client,
             task_queue=task_queue,
-            workflows=[StubbedResearchDebatesWorkflow],
+            workflows=[workflow_type],
             activities=activities.all(),
             activity_executor=executor,
         ):
             return await client.execute_workflow(
-                StubbedResearchDebatesWorkflow.run,
+                workflow_type.run,
                 request,
                 id=f"research-{uuid.uuid4()}",
                 task_queue=task_queue,
@@ -323,6 +368,46 @@ async def test_rerunning_the_workflow_does_not_duplicate(
     # per-run alignment is answerable again, rather than averaged across history
     for run_id in (first.research_run_id, second.research_run_id):
         assert ontology_alignment_score(read_session, research_run_id=run_id) == 1.0
+
+
+@pytest.mark.anyio
+async def test_an_unfinished_answer_fails_the_run_instead_of_finding_nothing(
+    workflow_env, committed_sessions, object_store, read_session: Session
+) -> None:
+    """The fourth silent-empty run in one session is what this exists to stop.
+
+    `finish_reason: length` used to be invisible: the truncated structured output
+    parsed into a findings object with empty tuples, the workflow stored nothing,
+    and the run closed as SUCCEEDED having "found no debates". The failure has to
+    be louder than the absence it looks like.
+    """
+
+    from temporalio.client import WorkflowFailureError
+
+    activities = ResearchActivities(
+        session_factory=committed_sessions, store=object_store, http=_http()
+    )
+
+    with pytest.raises(WorkflowFailureError) as failure:
+        await _run_workflow(
+            workflow_env.client,
+            activities,
+            ResearchInput(subject="Abdul El-Sayed"),
+            TruncatedResearchDebatesWorkflow,
+        )
+    # Temporal wraps it: the outer error only says the execution failed, and the
+    # ApplicationError carrying the reason is its cause.
+    cause = str(failure.value.cause)
+    assert "did not finish its answer" in cause
+    assert "length" in cause
+
+    # and the run row says so too, rather than sitting there as a success
+    run = read_session.scalars(
+        select(ResearchRun).where(ResearchRun.status == ResearchRunStatus.FAILED)
+    ).one()
+    assert run.task_type == "find_debates"
+    assert run.error_message is not None
+    assert "did not finish its answer" in run.error_message
 
 
 @pytest.mark.anyio

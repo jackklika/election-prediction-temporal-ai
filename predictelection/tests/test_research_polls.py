@@ -255,6 +255,48 @@ def test_a_lookalike_pollster_is_flagged_not_merged(session: Session, snapshot) 
     assert any("resembles existing" in reason for reason in reasons)
 
 
+def test_a_reviewed_merge_survives_the_next_import(session: Session, snapshot) -> None:
+    """The check without which the whole merge action is theatre.
+
+    A reviewer deciding "UC Berkeley and UC Berkeley IGS are one organization"
+    writes an `EntityRedirect`. This lookup used to return the alias row's owner
+    directly, so the very next import of a poll by the merged-away spelling
+    resolved straight back to the duplicate and filed the poll under it — the
+    merge looked applied and was undone in the same breath, silently.
+    """
+
+    from predictelection.sql import merge_entities, resolve_entity
+
+    context = IngestContext(session=session, snapshot=snapshot)
+    duplicate = resolve_pollster(context, "UC Berkeley")
+    canonical = resolve_pollster(context, "UC Berkeley IGS")
+    session.flush()
+    assert duplicate.entity_id != canonical.entity_id  # forked, as designed
+
+    merge_entities(
+        session,
+        duplicate_id=duplicate.entity_id,
+        canonical_id=canonical.entity_id,
+        reviewer="jack",
+        reason="the same institute under two names",
+    )
+
+    again = resolve_pollster(context, "UC Berkeley")
+    session.flush()
+    assert again.entity_id == canonical.entity_id
+
+    ingest_poll(_poll(pollster="UC Berkeley"), context)
+    session.flush()
+    revision = session.scalars(
+        select(PollRevision).order_by(PollRevision.created_at.desc())
+    ).first()
+    assert revision is not None
+    pollster_id = revision.pollster_id
+    assert pollster_id is not None
+    assert pollster_id == canonical.entity_id
+    assert resolve_entity(session, pollster_id) == canonical.entity_id
+
+
 def test_poll_key_round_trips() -> None:
     key = PollKey.build(
         contest=ContestKey.parse(MI_SENATE_DEM),

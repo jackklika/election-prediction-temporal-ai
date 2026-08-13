@@ -35,6 +35,7 @@ import uuid
 
 from pydantic import Field
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from predictelection.research.contests import ContestKey, PollKey, normalize_slug
 from predictelection.research.ingestion import Ingestion, IngestContext
@@ -51,6 +52,7 @@ from predictelection.sql import (
     new_poll_estimate,
     new_poll_option,
     new_poll_revision,
+    resolve_entity,
 )
 from predictelection.sql.polling import PollQuestion, PollSample
 
@@ -66,6 +68,9 @@ POLLSTER_SIMILARITY_FLOOR = 0.55
 Low deliberately: this feeds a ReviewTask, not a merge, so a false positive
 costs a reviewer seconds while a false negative is a silent fork.
 """
+
+LOOKALIKE_LIMIT = 5
+"""Merge candidates shown per unmatched pollster — a queue entry, not a report."""
 
 NEAR_DUPLICATE_WINDOW = dt.timedelta(days=3)
 """Same pollster, same contest, fieldwork ending within this of an existing
@@ -168,6 +173,33 @@ class ResolvedPollster:
     automatically; surfaced so ingest can file a ReviewTask."""
 
 
+def pollster_lookalikes(
+    session: Session, slug: str, *, limit: int = LOOKALIKE_LIMIT
+) -> tuple[tuple[uuid.UUID, str], ...]:
+    """Organizations whose names sit above the trigram floor for this slug.
+
+    Public because review reads it too: the reviewer deciding a "resembles an
+    existing pollster" task is choosing between exactly these candidates, and a
+    second copy of the query there could drift from the one that filed the task —
+    offering a merge target the ingestor never actually considered.
+    """
+
+    similarity = func.similarity(EntityAlias.normalized_name, slug)
+    return tuple(
+        (entity_id, alias)
+        for entity_id, alias in session.execute(
+            select(EntityAlias.entity_id, EntityAlias.name)
+            .join(Entity, Entity.id == EntityAlias.entity_id)
+            .where(
+                Entity.kind == EntityKind.ORGANIZATION,
+                similarity >= POLLSTER_SIMILARITY_FLOOR,
+            )
+            .order_by(similarity.desc())
+            .limit(limit)
+        )
+    )
+
+
 def resolve_pollster(context: IngestContext, name: str) -> ResolvedPollster:
     """Name to ORGANIZATION entity, matching on slug so punctuation collapses.
 
@@ -191,32 +223,26 @@ def resolve_pollster(context: IngestContext, name: str) -> ResolvedPollster:
         .limit(1)
     ).scalar()
     if match is not None:
+        # Through the redirect, not straight to the alias's owner. An alias keeps
+        # pointing at the entity it was written against, so a reviewer who merges
+        # two pollsters would see the merge undone by the next import — this
+        # lookup would resolve the old spelling back to the duplicate and file
+        # the poll under it. Every other resolution path already does this;
+        # `resolve_entity_mention` calls it in each of its tiers.
+        canonical = resolve_entity(session, match)
         # Known pollster under new punctuation: remember this spelling too. The
         # key must use the same normalization the alias row stores, or a miss
         # here becomes an IntegrityError whose recovery re-read also misses.
-        alias = new_entity_alias(entity_id=match, name=name)
+        alias = new_entity_alias(entity_id=canonical, name=name)
         get_or_create(
             session,
             alias,
-            key=(EntityAlias.entity_id == match)
+            key=(EntityAlias.entity_id == canonical)
             & (EntityAlias.normalized_name == alias.normalized_name),
         )
-        return ResolvedPollster(entity_id=match, created=False)
+        return ResolvedPollster(entity_id=canonical, created=False)
 
-    lookalikes = tuple(
-        (entity_id, alias)
-        for entity_id, alias in session.execute(
-            select(EntityAlias.entity_id, EntityAlias.name)
-            .join(Entity, Entity.id == EntityAlias.entity_id)
-            .where(
-                Entity.kind == EntityKind.ORGANIZATION,
-                func.similarity(EntityAlias.normalized_name, slug)
-                >= POLLSTER_SIMILARITY_FLOOR,
-            )
-            .order_by(func.similarity(EntityAlias.normalized_name, slug).desc())
-            .limit(5)
-        )
-    )
+    lookalikes = pollster_lookalikes(session, slug)
 
     resolved = context.resolve(EntityKind.ORGANIZATION, ScrapedEntity(name=name))
     if resolved.created:

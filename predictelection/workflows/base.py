@@ -44,7 +44,7 @@ from typing import Any, ClassVar
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 from predictelection.activities.contracts import (
     ArchiveUrlInput,
@@ -62,6 +62,7 @@ from predictelection.activities.contracts import (
 with workflow.unsafe.imports_passed_through():
     from pydantic_ai import Agent
     from pydantic_ai.durable_exec.temporal import PydanticAIWorkflow
+    from pydantic_ai.messages import ModelResponse
 
     from predictelection.research.scraped import ScrapedRecord
     from predictelection.sql import ResearchRunStatus, SourceKind
@@ -79,6 +80,23 @@ FETCH_ACTIVITY = workflow.ActivityConfig(
     start_to_close_timeout=timedelta(seconds=90),
     retry_policy=RetryPolicy(maximum_attempts=3),
 )
+
+
+UNFINISHED_REASONS = frozenset({"length", "content_filter", "error"})
+"""Finish reasons that mean the model stopped before it had said everything.
+
+`stop` and `tool_call` are the two ways a response ends on purpose. Everything
+else is the model being cut off, and on a structured output that arrives as a
+*valid* object rather than as an error: every `*Findings` model defaults its
+list fields to `()`, so a response truncated mid-generation parses as an honest
+"found nothing".
+
+That is not hypothetical. The candidacy agent's first two live runs both ended
+with `finish_reason: length`, and both were reported as clean runs that found
+zero candidates; the truncation was visible only in the Logfire trace. See
+`AGENT_MAX_TOKENS` in agents/base.py for the other half of the fix — that raises
+the ceiling, this makes hitting it audible.
+"""
 
 
 class Activity:
@@ -125,6 +143,64 @@ class ResearchWorkflow(PydanticAIWorkflow):
         """Ask the agent what it can find. The one part a domain must write."""
 
         raise NotImplementedError
+
+    async def ask(self, prompt: str) -> Any:
+        """Run the domain agent, refusing an answer the model did not finish.
+
+        Every `gather` goes through this rather than calling `self.agent.run`
+        directly, because the failure it catches is invisible at the call site:
+        a truncated structured response deserialises into a findings object with
+        empty lists, which is indistinguishable from a run that genuinely found
+        nothing. Four such runs were read as working ones in a single session.
+
+        Non-retryable on purpose. An overrun is a budget problem, not a flake —
+        a high-effort run that spent `AGENT_MAX_TOKENS` on thinking will spend it
+        again — and `TemporalDurability` already retries the model call itself,
+        so a retryable error here would multiply that. Raising instead lets
+        `research` below record the run as FAILED with the reason attached.
+
+        The returned output stays `Any`: `agent` is declared
+        `Agent[None, Any]`, so each domain annotates the findings type at its own
+        call site, where the agent that produces it is known.
+
+        Kept deliberately dull, because this runs in workflow code: an
+        `ApplicationError` fails the workflow, but any *other* exception fails the
+        workflow *task*, which Temporal then retries forever. A typo in this
+        method is therefore an infinite loop rather than a test failure — one
+        already cost a hung test run here.
+        """
+
+        result = await self.agent.run(prompt)
+        responses = [
+            message
+            for message in result.all_messages()
+            if isinstance(message, ModelResponse)
+        ]
+
+        # An earlier truncated response is only a warning: pydantic-ai may
+        # legitimately continue past one, and the answer that matters is the last.
+        for response in responses[:-1]:
+            if response.finish_reason in UNFINISHED_REASONS:
+                workflow.logger.warning(
+                    "%s: an intermediate response ended with %r",
+                    self.agent.name,
+                    response.finish_reason,
+                )
+
+        final = responses[-1] if responses else None
+        if final is not None and (
+            final.finish_reason in UNFINISHED_REASONS or final.state == "incomplete"
+        ):
+            raise ApplicationError(
+                f"{self.agent.name} did not finish its answer: "
+                f"finish_reason={final.finish_reason!r} state={final.state!r} "
+                f"after {result.usage.output_tokens} output tokens. Whatever it "
+                "did emit is incomplete, so it is not being stored. If the reason "
+                "is 'length', raise AGENT_MAX_TOKENS in agents/base.py.",
+                non_retryable=True,
+            )
+
+        return result.output
 
     async def research(self, request: ResearchInput) -> ResearchOutput:
         started: StartResearchRunOutput = await workflow.execute_activity(

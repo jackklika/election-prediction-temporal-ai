@@ -24,7 +24,7 @@ from predictelection.workflows.base import (
 )
 
 with workflow.unsafe.imports_passed_through():
-    from predictelection.agents.debates import debate_agent
+    from predictelection.agents.debates import DebateFindings, debate_agent
     from predictelection.research.debates import ScrapedDebate
     from predictelection.sql import EntityKind, PoliticalEventKind
 
@@ -68,11 +68,11 @@ class ResearchDebatesWorkflow(ResearchWorkflow):
         purely a reader.
         """
 
-        run = await self.agent.run(
+        findings: DebateFindings = await self.ask(
             f"Find the notable debates {request.subject} has taken part in."
             + await self._already_recorded(request.subject)
         )
-        return run.output.debates
+        return findings.debates
 
     async def _already_recorded(self, subject: str) -> str:
         """The subject's own debates, not the alphabetically first 50 events.

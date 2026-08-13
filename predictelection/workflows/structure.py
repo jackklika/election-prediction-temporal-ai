@@ -23,7 +23,7 @@ from predictelection.workflows.base import (
 )
 
 with workflow.unsafe.imports_passed_through():
-    from predictelection.agents.structure import structure_agent
+    from predictelection.agents.structure import StructureFindings, structure_agent
     from predictelection.research.structure import ScrapedRaceStructure
     from predictelection.sql import EntityKind
 
@@ -63,12 +63,12 @@ class ResearchStructureWorkflow(ResearchWorkflow):
                 request.subject,
             )
 
-        run = await self.agent.run(
+        findings: StructureFindings = await self.ask(
             "Describe the elections and contests for "
             f"{request.subject}, including both primaries and generals."
             + _already_recorded(known)
         )
-        return run.output.contests
+        return findings.contests
 
 
 def _already_recorded(known: FindEntitiesOutput) -> str:

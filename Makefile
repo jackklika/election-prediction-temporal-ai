@@ -1,4 +1,5 @@
-.PHONY: test test-db db-up db-down lint worker research demo migrate migration stamp
+.PHONY: test test-db db-up db-down lint worker research demo migrate migration stamp \
+        review review-next
 
 # Skips the tests that need PostgreSQL or MinIO.
 test:
@@ -70,6 +71,17 @@ import-fec: db-up
 research:
 	@test -n "$(SUBJECT)" || (echo 'usage: make research SUBJECT="Abdul El-Sayed" [KIND=debates|structure]'; exit 1)
 	uv run python -m predictelection.workflows.trigger "$(SUBJECT)" --kind "$(or $(KIND),debates)"
+
+# What ingestion could not decide for itself. Postgres only: review reads and
+# writes the graph, and never fetches or asks a model.
+#   make review               what is waiting
+#   make review-next          answer them one at a time
+#   make review ARGS="show 6d6d24ba"
+review: db-up
+	uv run python -m predictelection.review $(or $(ARGS),list)
+
+review-next: db-up
+	uv run python -m predictelection.review next
 
 # The whole ingestion path on a fixed debate, with no agent and no API calls.
 demo: db-up
