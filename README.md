@@ -10,10 +10,11 @@ This is the "map" part of ["The Map is not the Territory"](https://en.wikipedia.
 
 # Technical decisions
 
-- Postgres stores ontology models for claims, entities, and links between them. It was chosen because Postgres is familiar to me and is a solid foundation for an MVP. If this was a sparse KG, it may not be as good of a fit, but we are trying to keep it dense. If needed, we can extend it with Apache AGE, or migrate the data to a more comprehensive graph database.
-- Temporal is used for workflow execution. Pydantic AI Agents have native integration with it, the durable execution model is useful for non-deterministic LLM inferrence and handling failures, and it provides a great interface for interacting with long-running workflows.
-- S3 or Google Cloud Storage Objects are used because where else would we cheaply store scraped artifacts? Minio is used during development for integration testing, even though it is archived, because it seems stable and is only used locally for testing.
-- Python is the standard for these kinds of AI projects. Speed is not a top concern. And I am very familiar with this ecosystem. uv is also the current standard for dependency management in python.
+- **Facts sources**: We gather facts mainly by an agent doing web search, instead of data scources like votehub, AP news. This is mainly because I'm cheap, but also because I will assume that journalists will always write stories about these races.
+- **Database**: Postgres stores ontology models for claims, entities, and links between them. It was chosen because Postgres is familiar to me and is a solid foundation for an MVP. If this was a sparse KG, it may not be as good of a fit, but we are trying to keep it dense. If needed, we can extend it with Apache AGE, or migrate the data to a more comprehensive graph database.
+- **Workflow execution**: Temporal is used for workflow execution. Pydantic AI Agents have native integration with it, the durable execution model is useful for non-deterministic LLM inferrence and handling failures, and it provides a great interface for interacting with long-running workflows.
+- **Artifact/blob storage**: S3 or Google Cloud Storage Objects are used because where else would we cheaply store scraped artifacts? Minio is used during development for integration testing, even though it is archived, because it seems stable and is only used locally for testing.
+- **Language**: Python is the standard for these kinds of AI projects. Speed is not a top concern. If it becomes a concern, we can use marturin and write some rust code that is called by python. 
 
 # Goals
 
@@ -37,13 +38,15 @@ This is all in a shared ontology or knowledge base, defined in the sql schemas.
 
 # AI disclosure
 
-All human text, non-code text, like this README or all the commit messages, are written personally without llm assistance or generation.
+**All human text (non-code text) like this README or all the commit messages, are written personally without llm assistance or generation.**
 
-Claude Code and Codex have written a lot of code, including models, business logic, and infrastructure. 
+Claude Code has written a lot of code, including models, business logic, and infrastructure. 
 
-Initially I wanted to make this AI-free. My AGENTS.md file said "do not allow any AI generated code to enter this repo". But it was too much typing, and felt too slow when I have a good high-level vision of what to create here. My fingers started hurting!
+Initially I wanted to make this AI-free. My AGENTS.md file said "do not allow any AI generated code to enter this repo". But it was too much typing, and felt too slow when I have a good high-level vision of what to create here. My fingers started hurting, and I was moving too slow.
 
 For example, the kalshi client configuration is essentially a 1-1 mapping of our domain models to kalshi responses, and kalshi endpoints are derived from its API. I'm not typing that all out when I can just point it to a openapi yaml file.
+
+Or creating simple CRUD objects like the review queue are trivial and extremely testable. It is effective to give the agent requirements, it implements, I test, I give feedback, and it fixes, and it gets to a very good place.
 
 And for the sql models -- I have little experience modeling knowledge about events, like "Facts", "claims", or "ontology-aware knowledge graphs". But I understand what the paper is saying, and want it represented in sql. So having high-capability agents parse the research, present it to me, and being able to synthesize it into code... isn't that compelling? 
 
