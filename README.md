@@ -35,6 +35,7 @@ This is all in a shared ontology or knowledge base, defined in the sql schemas.
 
 # Inspiration
 - [Wikontic: Constructing Wikidata-Aligned, Ontology-Aware Knowledge Graphs with Large Language Models](https://aclanthology.org/2026.eacl-long.388.pdf): This is helping me understand how to work with wikidata, inserting triplets into a knowledge graph, and performing entity resolution.
+- [WikiSkill: Compiling Agent Experience into Persistent Knowledge for Skill Evolution](https://arxiv.org/abs/2608.27454): A blueprint for the unbuilt half of the target structure - feeding accepted review corrections back to agents. It compiles raw agent traces into a persistent, never-rolled-back knowledge layer that informs gated updates to agent instructions, which mirrors the claim/supersession/review invariants already enforced here, but applied to the agent's own behavior instead of election facts.
 
 # AI disclosure
 
